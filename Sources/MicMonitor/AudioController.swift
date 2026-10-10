@@ -185,6 +185,11 @@ final class AudioController: ObservableObject {
 
     private var captureEngine: AVAudioEngine?
     private var playbackEngine: AVAudioEngine?
+    /// 聚合模式(首选架构,与 AU Lab passthrough 同款):
+    /// 单引擎绑定私有聚合设备,输入输出同一时钟域,天然无漂移。
+    /// 创建失败时回退 captureEngine+playbackEngine 双引擎路径。
+    private var unifiedEngine: AVAudioEngine?
+    private var aggregateID: AudioDeviceID = 0
     private var ring: RingBuffer?
     private var canonicalFormat: AVAudioFormat?
     private var configObservers: [NSObjectProtocol] = []
@@ -210,6 +215,8 @@ final class AudioController: ObservableObject {
     private var accOverflow = 0
 
     init() {
+        // 清理上次异常退出可能残留的聚合设备(正常路径 stopPipeline 已销毁)
+        CoreAudioUtil.destroyStaleAggregates()
         devices.onEvent = { [weak self] selector in
             Task { @MainActor [weak self] in self?.handleDeviceEvent(selector) }
         }
@@ -338,10 +345,32 @@ final class AudioController: ObservableObject {
         }
 
         do {
-            try buildPlaybackEngine(output: outDev)
-            log.log("播放引擎已启动")
-            try buildCaptureEngine(input: inDev)
-            log.log("采集引擎已启动")
+            // 首选:私有聚合设备 + 单引擎(AU Lab passthrough 同款方案)。
+            // 输入输出在同一 IO proc/时钟域,系统做漂移补偿,无欠载/回声问题。
+            // 聚合创建失败时回退原双引擎路径。
+            if let inDev, let outDev,
+               let agg = CoreAudioUtil.createAggregateDevice(inputUID: inDev.uid, outputUID: outDev.uid) {
+                do {
+                    try buildUnifiedEngine(aggregate: agg, input: inDev, output: outDev)
+                    log.log("统一引擎已启动(聚合设备 id=\(agg))")
+                } catch {
+                    log.log("统一引擎启动失败,回退双引擎:\(error.localizedDescription)")
+                    unifiedEngine?.stop()
+                    unifiedEngine = nil
+                    if aggregateID != 0 {
+                        CoreAudioUtil.destroyAggregateDevice(aggregateID)
+                        aggregateID = 0
+                    }
+                    try buildDualEngines(input: inDev, output: outDev)
+                }
+            } else {
+                if inDev == nil || outDev == nil {
+                    log.log("输入/输出设备未具体指定,使用双引擎路径")
+                } else {
+                    log.log("聚合设备创建失败,回退双引擎")
+                }
+                try buildDualEngines(input: inDev, output: outDev)
+            }
             // 引擎 start/installTap 引发的配置变化通知会在稍后投递到主队列,
             // 在启动完成后才设窗口,确保覆盖这些"自己造成"的通知
             suppressConfigChangesUntil = Date().addingTimeInterval(2.0)
@@ -358,8 +387,80 @@ final class AudioController: ObservableObject {
         updateBluetoothWarning()
         if wasWaiting { errorMessage = nil }
         log.log("直通开启:输入[\(inDev?.name ?? "系统默认")] → 输出[\(outDev?.name ?? "系统默认")],"
-            + " 输出 \(Int(sampleRate))Hz × \(outputChannelCount)ch,目标水位 \(ring?.targetWater ?? 0) 帧")
+            + " 输出 \(Int(sampleRate))Hz × \(outputChannelCount)ch,目标水位 \(ring?.targetWater ?? 0) 帧"
+            + (unifiedEngine != nil ? " [聚合模式]" : " [双引擎模式]"))
         scheduleLowLatencyCheck()
+    }
+
+    /// 双引擎兜底路径:独立采集引擎 + 独立播放引擎(各自绑定设备)
+    private func buildDualEngines(input inDev: AudioDeviceInfo?, output outDev: AudioDeviceInfo?) throws {
+        try buildPlaybackEngine(output: outDev)
+        log.log("播放引擎已启动")
+        try buildCaptureEngine(input: inDev)
+        log.log("采集引擎已启动")
+    }
+
+    /// 统一引擎:私有聚合设备把输入+输出合成一个逻辑设备,单个 AVAudioEngine 驱动。
+    /// tap(输入)→ 环形缓冲 → source(输出)全部保留,但两端回调跑在同一个 IO 周期里,
+    /// 由系统对两个子设备做漂移补偿——双引擎架构的欠载/时钟漂移问题在原理上不存在。
+    private func buildUnifiedEngine(aggregate aggID: AudioDeviceID,
+                                    input inDev: AudioDeviceInfo, output outDev: AudioDeviceInfo) throws {
+        let engine = AVAudioEngine()
+        engine.isAutoShutdownEnabled = false
+
+        do {
+            try engine.inputNode.setVoiceProcessingEnabled(false)
+        } catch {
+            log.log("关闭 VoiceProcessing 失败(继续运行):\(error.localizedDescription)")
+        }
+        guard let au = engine.outputNode.audioUnit else {
+            throw PipelineError.os("获取输出 AudioUnit 失败", -1)
+        }
+        // 统一引擎的 inputNode/outputNode 共享同一个 IO 单元,绑一次即覆盖双向
+        let status = Self.setAudioUnitDevice(au, aggID)
+        guard status == noErr else { throw PipelineError.os("绑定聚合设备失败", status) }
+
+        // 聚合设备是我们私有的、用完即毁,直接改其 IO 缓冲无需恢复原值
+        let ioFrames = lowLatency
+            ? requestIOBufferFrames(aggID, input: false, wanted: 256)
+            : Int(CoreAudioUtil.bufferFrameSize(aggID, input: false) ?? 512)
+
+        let sr = (outDev.nominalSampleRate) > 0 ? outDev.nominalSampleRate : 48000
+        let ch = max(1, min(8, outDev.outputChannels))
+        // 必须非交错:AVAudioMixerNode 输入不接受 interleaved(-10868),planar 也是引擎原生布局
+        guard let canonical = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr,
+                                            channels: AVAudioChannelCount(ch), interleaved: false) else {
+            throw PipelineError.format
+        }
+        sampleRate = sr
+        outputChannelCount = ch
+        canonicalFormat = canonical
+
+        // 同一时钟域,水位只需覆盖调度抖动:目标 ≈3 块,高水位 8 块
+        let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.4), 8192), channelCount: ch,
+                                 targetWater: max(512, ioFrames * 3),
+                                 highWater: max(2048, ioFrames * 8))
+        ring = ringBuf
+
+        let rctx = RenderContext(ring: ringBuf, shared: meter, channelCount: ch, sampleRate: sr)
+        rctx.dsp.reset()
+        let source = AVAudioSourceNode(format: canonical) { isSilence, _, frameCount, abl -> OSStatus in
+            Self.render(ctx: rctx, isSilence: isSilence, frameCount: Int(frameCount), abl: abl)
+        }
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: canonical)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+
+        let cctx = CaptureContext(ring: ringBuf, shared: meter, canonicalFormat: canonical,
+                                  channelCount: ch, prefillFrames: ringBuf.targetWater)
+        engine.inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 256 : 512, format: nil) { buffer, _ in
+            Self.tap(ctx: cctx, buffer: buffer)
+        }
+
+        engine.prepare()
+        try engine.start()
+        unifiedEngine = engine
+        aggregateID = aggID
     }
 
     /// 低延迟模式自检:启动 2s 后看欠载次数是否异常。
@@ -684,10 +785,20 @@ final class AudioController: ObservableObject {
             cap.inputNode.removeTap(onBus: 0)
             cap.stop()
         }
+        if let uni = unifiedEngine {
+            uni.inputNode.removeTap(onBus: 0)
+            uni.stop()
+        }
         playbackEngine?.stop()
         captureEngine = nil
         playbackEngine = nil
-        // 恢复被低延迟模式改过的设备 IO 缓冲
+        unifiedEngine = nil
+        // 聚合设备是我们创建并拥有的,销毁它(HAL 会自动断开内部子设备引用)
+        if aggregateID != 0 {
+            CoreAudioUtil.destroyAggregateDevice(aggregateID)
+            aggregateID = 0
+        }
+        // 恢复被低延迟模式改过的物理设备 IO 缓冲(聚合设备已销毁,无需恢复)
         for (devID, isInput, frames) in ioBufferOriginals {
             _ = CoreAudioUtil.setBufferFrameSize(devID, input: isInput, frames: frames)
         }
@@ -706,7 +817,8 @@ final class AudioController: ObservableObject {
     }
 
     private func registerConfigObservers() {
-        for (engine, tag) in [(captureEngine, "capture"), (playbackEngine, "playback")] {
+        for (engine, tag) in [(captureEngine, "capture"), (playbackEngine, "playback"),
+                              (unifiedEngine, "unified")] {
             guard let engine else { continue }
             let o = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
@@ -779,8 +891,12 @@ final class AudioController: ObservableObject {
     }
 
     private func refreshLists() {
-        inputDevices = devices.devices.filter { $0.hasInput }
-        outputDevices = devices.devices.filter { $0.hasOutput }
+        // 隐藏我们自己创建的聚合设备(直通内部实现细节,不应出现在可选列表)
+        let visible = devices.devices.filter {
+            !$0.uid.hasPrefix(CoreAudioUtil.aggregateUIDPrefix)
+        }
+        inputDevices = visible.filter { $0.hasInput }
+        outputDevices = visible.filter { $0.hasOutput }
         defaultInputName = devices.info(forID: CoreAudioUtil.defaultDeviceID(input: true))?.name ?? "不可用"
         defaultOutputName = devices.info(forID: CoreAudioUtil.defaultDeviceID(input: false))?.name ?? "不可用"
     }

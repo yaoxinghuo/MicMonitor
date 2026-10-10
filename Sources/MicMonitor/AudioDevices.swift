@@ -85,6 +85,46 @@ enum CoreAudioUtil {
                  type: AudioDeviceID.self) ?? 0
     }
 
+    /// 自建聚合设备的 UID 前缀:用于在设备列表里隐藏它、启动时清理上次残留
+    static let aggregateUIDPrefix = "com.micmonitor.aggregate."
+
+    /// 创建私有聚合设备:输入子设备 + 输出子设备,输出做主时钟,全部开漂移补偿。
+    /// 输入输出在同一个时钟域 → 无需双引擎/大环形缓冲,彻底消除时钟漂移欠载。
+    /// (与 AU Lab 的 passthrough 配置同款方案)
+    static func createAggregateDevice(inputUID: String, outputUID: String) -> AudioDeviceID? {
+        var subs: [[String: Any]] = [
+            [kAudioSubDeviceUIDKey: inputUID, kAudioSubDeviceDriftCompensationKey: true]
+        ]
+        if outputUID != inputUID {
+            subs.append([kAudioSubDeviceUIDKey: outputUID, kAudioSubDeviceDriftCompensationKey: true])
+        }
+        let desc: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "MicMonitor Passthrough",
+            kAudioAggregateDeviceUIDKey: aggregateUIDPrefix + UUID().uuidString,
+            kAudioAggregateDeviceIsPrivateKey: true,   // 不出现在音频 MIDI 设置,进程退出即消失
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceMasterSubDeviceKey: outputUID,
+            kAudioAggregateDeviceSubDeviceListKey: subs,
+        ]
+        var devID = AudioDeviceID(0)
+        let status = AudioHardwareCreateAggregateDevice(desc as CFDictionary, &devID)
+        return status == noErr && devID != 0 ? devID : nil
+    }
+
+    static func destroyAggregateDevice(_ id: AudioDeviceID) {
+        AudioHardwareDestroyAggregateDevice(id)
+    }
+
+    /// 清理上次进程异常退出残留的聚合设备(私有设备随进程销毁,这里是双保险)
+    static func destroyStaleAggregates() {
+        for id in allDeviceIDs() {
+            if let u = stringProperty(id, kAudioDevicePropertyDeviceUID),
+               u.hasPrefix(aggregateUIDPrefix) {
+                destroyAggregateDevice(id)
+            }
+        }
+    }
+
     /// 设备当前 IO 缓冲帧数(优先方向 scope,内置设备上有些属性挂在全局 scope)
     static func bufferFrameSize(_ device: AudioDeviceID, input: Bool) -> UInt32? {
         let scope = input ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput
