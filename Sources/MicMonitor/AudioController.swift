@@ -178,6 +178,12 @@ final class AudioController: ObservableObject {
 
     private var pendingAutoResume = false
     private var rebuildTask: Task<Void, Never>?
+    /// 自身重建引擎(setAudioUnitDevice/installTap/start)会触发引擎再发
+    /// AVAudioEngineConfigurationChange 通知 → 不抑制的话"重建→通知→重建"死循环。
+    /// 启动后 2s 内到达的通知视为自身副作用,直接忽略;
+    /// 真正的拔插事件由 kAudioHardwarePropertyDevices 监听兜底,不依赖此通知。
+    private var suppressConfigChangesUntil = Date.distantPast
+    private var suppressedConfigChanges = 0
     private var sampleRate = 48000.0
     private var outputChannelCount = 2
     // ring 随引擎重建,旧计数在这里累计
@@ -315,6 +321,9 @@ final class AudioController: ObservableObject {
             log.log("播放引擎已启动")
             try buildCaptureEngine(input: inDev)
             log.log("采集引擎已启动")
+            // 引擎 start/installTap 引发的配置变化通知会在稍后投递到主队列,
+            // 在启动完成后才设窗口,确保覆盖这些"自己造成"的通知
+            suppressConfigChangesUntil = Date().addingTimeInterval(2.0)
             registerConfigObservers()
         } catch {
             log.log("启动失败:\(error.localizedDescription)")
@@ -619,8 +628,13 @@ final class AudioController: ObservableObject {
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.log.log("引擎配置变化(\(tag)),重建管线")
-                    self?.scheduleRebuild("配置变化")
+                    guard let self else { return }
+                    guard Date() >= self.suppressConfigChangesUntil else {
+                        self.suppressedConfigChanges += 1
+                        return
+                    }
+                    self.log.log("引擎配置变化(\(tag)),重建管线")
+                    self.scheduleRebuild("配置变化")
                 }
             }
             configObservers.append(o)
@@ -802,7 +816,8 @@ final class AudioController: ObservableObject {
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",
                             sampleRate, outputChannelCount, bufferedMS))
         lines.append("欠载 \(underrunCount) 次 · 溢出丢弃 \(overflowCount) 次 · 重建 \(restartCount) 次"
-            + " · 转换错误 \(meter.convertErrors.load(ordering: .relaxed)) 次")
+            + " · 转换错误 \(meter.convertErrors.load(ordering: .relaxed)) 次"
+            + " · 抑制配置通知 \(suppressedConfigChanges) 次")
         lines.append("设备列表:")
         for d in devices.devices {
             lines.append("  \(d.name) | uid=\(d.uid) | in \(d.inputChannels)ch out \(d.outputChannels)ch"
