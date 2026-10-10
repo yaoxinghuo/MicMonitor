@@ -1,7 +1,9 @@
 import Foundation
 import Synchronization
 
-/// 单生产者-单消费者(SPSC)无锁环形缓冲区,数据按帧交错存放(Float × 声道数)。
+/// 单生产者-单消费者(SPSC)无锁环形缓冲区,planar 布局:
+/// 存储按声道分段 [ch][frameIndex](ch0 的全部样本 → ch1 的全部样本 → …),
+/// 与 AVAudioEngine 原生非交错布局一致,读写都是整段连续拷贝。
 ///
 /// - 生产者:采集端 tap 回调(实时音频线程)
 /// - 消费者:播放端渲染回调(实时音频线程)
@@ -11,13 +13,14 @@ import Synchronization
 /// 原子量转交给消费者执行,从而维持单侧写索引的纪律。
 ///
 /// ⚠️ 本类所有方法都可能在实时音频线程执行:禁止分配内存、加锁、打日志。
+/// 声道指针数组由调用方预先分配(CaptureContext/RenderContext 持有),回调内零分配。
 final class RingBuffer: @unchecked Sendable {
     /// 缓冲区容量(帧)
     let capacityFrames: Int
     /// 声道数
     let channelCount: Int
 
-    private let storage: UnsafeMutableBufferPointer<Float>
+    private let storage: UnsafeMutableBufferPointer<Float>  // 布局:ch * capacityFrames + frame
     private let writePos = Atomic<Int>(0)   // 单调递增写位置(帧),仅生产者写
     private let readPos = Atomic<Int>(0)    // 单调递增读位置(帧),仅消费者写
     /// 生产者 → 消费者:请求丢弃最旧数据的帧数,由消费者在下次读取时生效
@@ -50,13 +53,17 @@ final class RingBuffer: @unchecked Sendable {
         writePos.load(ordering: .acquiring) - readPos.load(ordering: .acquiring)
     }
 
+    private func channelPtr(_ ch: Int) -> UnsafeMutablePointer<Float> {
+        storage.baseAddress! + ch * capacityFrames
+    }
+
     // MARK: - 生产者(采集 tap 线程)
 
-    /// 写入交错格式样本。空间不足时丢弃写不下的尾部;写入后水位超过 highWater
-    /// 时请求消费端丢弃最旧数据,把延迟拉回 targetWater。
+    /// 写入 planar 数据:srcs.count = channelCount,srcs[c] 指向第 c 声道 frameCount 个样本。
+    /// 空间不足时丢弃写不下的尾部;写入后水位超过 highWater 时请求消费端丢弃最旧数据。
     /// - Returns: 实际写入的帧数
     @discardableResult
-    func write(_ src: UnsafeBufferPointer<Float>, frameCount: Int) -> Int {
+    func write(_ srcs: UnsafeBufferPointer<UnsafeBufferPointer<Float>>, frameCount: Int) -> Int {
         let w = writePos.load(ordering: .relaxed)
         let r = readPos.load(ordering: .acquiring)
         let pending = dropRequest.load(ordering: .relaxed)
@@ -81,9 +88,10 @@ final class RingBuffer: @unchecked Sendable {
         while written < n {
             let frameIndex = (w + written) % capacityFrames
             let chunk = min(n - written, capacityFrames - frameIndex)
-            (storage.baseAddress! + frameIndex * channelCount)
-                .update(from: src.baseAddress! + written * channelCount,
-                        count: chunk * channelCount)
+            for c in 0..<channelCount {
+                (channelPtr(c) + frameIndex)
+                    .update(from: srcs[c].baseAddress! + written, count: chunk)
+            }
             written += chunk
         }
         writePos.store(w + n, ordering: .releasing)
@@ -104,8 +112,9 @@ final class RingBuffer: @unchecked Sendable {
         while done < n {
             let frameIndex = (w + done) % capacityFrames
             let chunk = min(n - done, capacityFrames - frameIndex)
-            memset(storage.baseAddress! + frameIndex * channelCount, 0,
-                   chunk * channelCount * MemoryLayout<Float>.size)
+            for c in 0..<channelCount {
+                memset(channelPtr(c) + frameIndex, 0, chunk * MemoryLayout<Float>.size)
+            }
             done += chunk
         }
         if n > 0 { writePos.store(w + n, ordering: .releasing) }
@@ -113,10 +122,11 @@ final class RingBuffer: @unchecked Sendable {
 
     // MARK: - 消费者(渲染线程)
 
-    /// 读取交错格式数据到 dst。数据不足时剩余部分填 0 并计入 underrun。
+    /// 读取 planar 数据:dsts.count = channelCount,dsts[c] 指向第 c 声道的输出缓冲。
+    /// 数据不足时剩余部分填 0 并计入 underrun。
     /// - Returns: 实际读到的有效帧数
     @discardableResult
-    func read(_ dst: UnsafeMutableBufferPointer<Float>, frameCount: Int) -> Int {
+    func read(_ dsts: UnsafeBufferPointer<UnsafeMutablePointer<Float>>, frameCount: Int) -> Int {
         // 生效生产者的丢弃请求(readPos 只能在这一侧写)
         let drop = dropRequest.exchange(0, ordering: .acquiringAndReleasing)
         var r = readPos.load(ordering: .relaxed)
@@ -131,17 +141,20 @@ final class RingBuffer: @unchecked Sendable {
         while copied < n {
             let frameIndex = (r + copied) % capacityFrames
             let chunk = min(n - copied, capacityFrames - frameIndex)
-            (dst.baseAddress! + copied * channelCount)
-                .update(from: storage.baseAddress! + frameIndex * channelCount,
-                        count: chunk * channelCount)
+            for c in 0..<channelCount {
+                (dsts[c] + copied)
+                    .update(from: channelPtr(c) + frameIndex, count: chunk)
+            }
             copied += chunk
         }
         readPos.store(r + n, ordering: .releasing)
 
         if n < frameCount {
-            memset(dst.baseAddress! + n * channelCount, 0,
-                   (frameCount - n) * channelCount * MemoryLayout<Float>.size)
-            underrunFrames.add(frameCount - n, ordering: .relaxed)
+            let missing = frameCount - n
+            for c in 0..<channelCount {
+                memset(dsts[c] + n, 0, missing * MemoryLayout<Float>.size)
+            }
+            underrunFrames.add(missing, ordering: .relaxed)
             if n == 0 { underrunEvents.add(1, ordering: .relaxed) }
         }
         return n

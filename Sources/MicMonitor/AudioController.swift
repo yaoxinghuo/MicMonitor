@@ -25,18 +25,41 @@ final class MeterState: @unchecked Sendable {
 final class CaptureContext: @unchecked Sendable {
     let ring: RingBuffer
     let shared: MeterState
-    let canonicalFormat: AVAudioFormat   // 交错 Float32,播放端采样率与声道数
+    let canonicalFormat: AVAudioFormat   // 非交错 Float32,播放端采样率与声道数
+    let channelCount: Int
     let prefillFrames: Int
+    /// 声道指针数组(预分配):ring.write 的入参,回调内零分配
+    let inPtrs: UnsafeMutableBufferPointer<UnsafeBufferPointer<Float>>
+    /// 转换器意外吐出交错布局时的拆分暂存:[ch][scratchFrames]
+    let scratch: UnsafeMutableBufferPointer<Float>
+    let scratchPtrs: UnsafeMutableBufferPointer<UnsafeBufferPointer<Float>>
+    let scratchFrames = 8192
     var converter: AVAudioConverter?
     var inSampleRate: Double = 0
     var inChannels: UInt32 = 0
     var outBuffer: AVAudioPCMBuffer?
 
-    init(ring: RingBuffer, shared: MeterState, canonicalFormat: AVAudioFormat, prefillFrames: Int) {
+    init(ring: RingBuffer, shared: MeterState, canonicalFormat: AVAudioFormat,
+         channelCount: Int, prefillFrames: Int) {
         self.ring = ring
         self.shared = shared
         self.canonicalFormat = canonicalFormat
+        self.channelCount = channelCount
         self.prefillFrames = prefillFrames
+        inPtrs = .allocate(capacity: channelCount)
+        scratch = .allocate(capacity: channelCount * scratchFrames)
+        scratch.initialize(repeating: 0)
+        scratchPtrs = .allocate(capacity: channelCount)
+        for c in 0..<channelCount {
+            scratchPtrs[c] = UnsafeBufferPointer(
+                start: scratch.baseAddress! + c * scratchFrames, count: scratchFrames)
+        }
+    }
+
+    deinit {
+        inPtrs.deallocate()
+        scratch.deallocate()
+        scratchPtrs.deallocate()
     }
 }
 
@@ -47,19 +70,32 @@ final class RenderContext: @unchecked Sendable {
     let dsp = DSPEngine()
     let channelCount: Int
     let sampleRate: Double
+    /// 渲染缓冲的声道指针数组(预分配)
+    let outPtrs: UnsafeMutableBufferPointer<UnsafeMutablePointer<Float>>
+    /// 渲染侧若意外收到交错布局时的兜底暂存:[ch][scratchFrames]
+    let scratch: UnsafeMutableBufferPointer<Float>
+    let scratchPtrs: UnsafeMutableBufferPointer<UnsafeMutablePointer<Float>>
     let scratchFrames = 4096
-    let scratch: UnsafeMutableBufferPointer<Float>  // 非交错布局兜底暂存
 
     init(ring: RingBuffer, shared: MeterState, channelCount: Int, sampleRate: Double) {
         self.ring = ring
         self.shared = shared
         self.channelCount = channelCount
         self.sampleRate = sampleRate
-        scratch = .allocate(capacity: scratchFrames * channelCount)
+        outPtrs = .allocate(capacity: channelCount)
+        scratch = .allocate(capacity: channelCount * scratchFrames)
         scratch.initialize(repeating: 0)
+        scratchPtrs = .allocate(capacity: channelCount)
+        for c in 0..<channelCount {
+            scratchPtrs[c] = scratch.baseAddress! + c * scratchFrames
+        }
     }
 
-    deinit { scratch.deallocate() }
+    deinit {
+        outPtrs.deallocate()
+        scratch.deallocate()
+        scratchPtrs.deallocate()
+    }
 }
 
 @MainActor
@@ -276,7 +312,9 @@ final class AudioController: ObservableObject {
 
         do {
             try buildPlaybackEngine(output: outDev)
+            log.log("播放引擎已启动")
             try buildCaptureEngine(input: inDev)
+            log.log("采集引擎已启动")
             registerConfigObservers()
         } catch {
             log.log("启动失败:\(error.localizedDescription)")
@@ -308,8 +346,9 @@ final class AudioController: ObservableObject {
 
         let sr = (output?.nominalSampleRate ?? 0) > 0 ? output!.nominalSampleRate : 48000
         let ch = max(1, min(8, output?.outputChannels ?? 2))
+        // 必须非交错:AVAudioMixerNode 输入不接受 interleaved(-10868),planar 也是引擎原生布局
         guard let canonical = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr,
-                                            channels: AVAudioChannelCount(ch), interleaved: true) else {
+                                            channels: AVAudioChannelCount(ch), interleaved: false) else {
             throw PipelineError.format
         }
         sampleRate = sr
@@ -357,7 +396,7 @@ final class AudioController: ObservableObject {
         }
 
         let ctx = CaptureContext(ring: ring, shared: meter, canonicalFormat: canonical,
-                                 prefillFrames: ring.targetWater)
+                                 channelCount: outputChannelCount, prefillFrames: ring.targetWater)
         // format: nil → 使用设备原生输入格式,在回调内做格式转换
         inputNode.installTap(onBus: 0, bufferSize: 512, format: nil) { buffer, _ in
             Self.tap(ctx: ctx, buffer: buffer)
@@ -444,12 +483,31 @@ final class AudioController: ObservableObject {
         if ctx.ring.availableFrames == 0 {
             ctx.ring.writeSilence(ctx.prefillFrames)
         }
-        let outChannels = Int(ctx.canonicalFormat.channelCount)
-        for b in UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList) {
-            guard let data = b.mData else { continue }
-            let count = Int(b.mDataByteSize) / MemoryLayout<Float>.size
-            let src = UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: count)
-            ctx.ring.write(src, frameCount: count / outChannels)
+        let outChannels = ctx.channelCount
+        let abl = UnsafeMutableAudioBufferListPointer(out.mutableAudioBufferList)
+        if abl.count == outChannels {
+            // 正常路径:转换器输出与 canonical 一致的非交错布局
+            var i = 0
+            for b in abl where i < outChannels {
+                guard let data = b.mData else { return }
+                ctx.inPtrs[i] = UnsafeBufferPointer(
+                    start: data.assumingMemoryBound(to: Float.self), count: frames)
+                i += 1
+            }
+            ctx.ring.write(UnsafeBufferPointer(ctx.inPtrs), frameCount: frames)
+        } else if abl.count == 1, let data = abl[0].mData {
+            // 兜底:转换器吐出了交错布局 → 拆分到 scratch 平面再写环
+            let p = data.assumingMemoryBound(to: Float.self)
+            var f = 0
+            while f < frames {
+                let chunk = min(frames - f, ctx.scratchFrames)
+                for c in 0..<outChannels {
+                    let plane = ctx.scratch.baseAddress! + c * ctx.scratchFrames
+                    for i in 0..<chunk { plane[i] = p[(f + i) * outChannels + c] }
+                }
+                ctx.ring.write(UnsafeBufferPointer(ctx.scratchPtrs), frameCount: chunk)
+                f += chunk
+            }
         }
     }
 
@@ -466,25 +524,37 @@ final class AudioController: ObservableObject {
 
         let list = UnsafeMutableAudioBufferListPointer(abl)
         var gotAny = false
-        if list.count == 1, let data = list[0].mData {
-            // 交错布局(canonical 格式):一块内存包含全部声道
-            let dst = UnsafeMutableBufferPointer(start: data.assumingMemoryBound(to: Float.self),
-                                                 count: frameCount * ctx.channelCount)
-            gotAny = ctx.ring.read(dst, frameCount: frameCount) > 0
-            ctx.dsp.process(dst, frames: frameCount, channels: ctx.channelCount)
-        } else if list.count == ctx.channelCount {
-            // 非交错兜底:逐块读到 scratch,DSP 后按声道拆分
+        if list.count == ctx.channelCount {
+            // 正常路径:canonical 非交错,每声道一块缓冲
+            var ok = true
+            var i = 0
+            for b in list where i < ctx.channelCount {
+                guard let data = b.mData else { ok = false; break }
+                ctx.outPtrs[i] = data.assumingMemoryBound(to: Float.self)
+                i += 1
+            }
+            if ok {
+                let dsts = UnsafeBufferPointer(ctx.outPtrs)
+                gotAny = ctx.ring.read(dsts, frameCount: frameCount) > 0
+                ctx.dsp.process(dsts, frames: frameCount, channels: ctx.channelCount)
+            } else {
+                for b in list {
+                    if let data = b.mData { memset(data, 0, Int(b.mDataByteSize)) }
+                }
+            }
+        } else if list.count == 1, ctx.channelCount > 1, let data = list[0].mData {
+            // 兜底:渲染缓冲是交错布局 → 读到 scratch 平面,DSP 后交错写出
+            let p = data.assumingMemoryBound(to: Float.self)
             var f = 0
             while f < frameCount {
                 let chunk = min(frameCount - f, ctx.scratchFrames)
-                let scratch = UnsafeMutableBufferPointer(start: ctx.scratch.baseAddress,
-                                                         count: chunk * ctx.channelCount)
-                if ctx.ring.read(scratch, frameCount: chunk) > 0 { gotAny = true }
-                ctx.dsp.process(scratch, frames: chunk, channels: ctx.channelCount)
-                for (ch, b) in list.enumerated() where ch < ctx.channelCount {
-                    guard let data = b.mData else { continue }
-                    let p = data.assumingMemoryBound(to: Float.self)
-                    for i in 0..<chunk { p[f + i] = scratch[i * ctx.channelCount + ch] }
+                let sd = UnsafeBufferPointer(ctx.scratchPtrs)
+                if ctx.ring.read(sd, frameCount: chunk) > 0 { gotAny = true }
+                ctx.dsp.process(sd, frames: chunk, channels: ctx.channelCount)
+                for i in 0..<chunk {
+                    for c in 0..<ctx.channelCount {
+                        p[(f + i) * ctx.channelCount + c] = ctx.scratchPtrs[c][i]
+                    }
                 }
                 f += chunk
             }

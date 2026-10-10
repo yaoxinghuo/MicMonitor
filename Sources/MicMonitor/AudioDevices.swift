@@ -50,12 +50,13 @@ enum CoreAudioUtil {
                             scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
                             type: T.Type) -> T? {
         var addr = address(selector, scope: scope)
-        var value: T? = nil
+        // 注意:不能直接写 Optional<T> 的存储 —— 对没有 spare inhabitant 的类型,
+        // Optional 的 nil 标记在独立字节上,写 payload 后仍会被读作 nil
+        let ptr = UnsafeMutablePointer<T>.allocate(capacity: 1)
+        defer { ptr.deallocate() }
         var size = UInt32(MemoryLayout<T>.size)
-        let status = withUnsafeMutablePointer(to: &value) { ptr in
-            AudioObjectGetPropertyData(object, &addr, 0, nil, &size, ptr)
-        }
-        return status == noErr ? value : nil
+        let status = AudioObjectGetPropertyData(object, &addr, 0, nil, &size, ptr)
+        return status == noErr ? ptr.pointee : nil
     }
 
     /// 读取 CFString 属性。CoreAudio 按 copy 语义返回,用 Unmanaged + takeRetainedValue 平衡引用。

@@ -3,6 +3,7 @@ import Foundation
 /// 播放端渲染链路的 DSP:音量增益(线性斜坡防爆音)→ 噪声门 → 软限幅。
 /// 纯内部状态 + 计算,无外部依赖,可单元测试。
 /// 在实时渲染线程运行:不分配、不加锁、不打日志。
+/// 输入为 planar 布局(每声道一段连续样本)。
 final class DSPEngine: @unchecked Sendable {
 
     // ---- 音量 ----
@@ -23,6 +24,16 @@ final class DSPEngine: @unchecked Sendable {
     // ---- 电平(只读,供 UI 电平表)----
     private(set) var inputPeak: Float = 0
     private(set) var outputPeak: Float = 0
+
+    /// 逐帧总增益系数暂存(音量 × 门开合度),init 预分配;超过则分块处理
+    private let gainScratch: UnsafeMutableBufferPointer<Float>
+
+    init(gainScratchFrames: Int = 8192) {
+        gainScratch = .allocate(capacity: gainScratchFrames)
+        gainScratch.initialize(repeating: 1)
+    }
+
+    deinit { gainScratch.deallocate() }
 
     /// 设置目标音量(0~2,超过 1 的部分靠软限幅防爆音)。
     /// 增益按线性斜坡在 rampFrames 帧内平滑到位。
@@ -47,44 +58,51 @@ final class DSPEngine: @unchecked Sendable {
         envDecayCoeff = expf(-1 / (envDecaySec * sr))
     }
 
-    /// 就地处理一块交错格式音频。返回本块输入峰值(门限之前,供阈值调试)。
+    /// 就地处理一块 planar 音频(dsts[c] 为第 c 声道的缓冲)。返回本块输入峰值。
+    /// 两遍处理:先逐帧算出总增益(音量斜坡 × 门开合度),再逐声道施加并限幅。
     @discardableResult
-    func process(_ buffer: UnsafeMutableBufferPointer<Float>, frames: Int, channels: Int) -> Float {
+    func process(_ dsts: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
+                 frames: Int, channels: Int) -> Float {
         var inPeak: Float = 0
         var outPeak: Float = 0
-        for f in 0..<frames {
-            let base = f * channels
+        var f = 0
+        while f < frames {
+            let n = min(frames - f, gainScratch.count)
+            // 第一遍:逐帧计算峰值包络、门开合度、音量斜坡 → 总增益
+            for i in 0..<n {
+                let fi = f + i
+                var framePeak: Float = 0
+                for c in 0..<channels {
+                    let v = dsts[c][fi]
+                    let a = v < 0 ? -v : v
+                    if a > framePeak { framePeak = a }
+                }
+                if framePeak > inPeak { inPeak = framePeak }
 
-            // 帧内峰值(跨声道取最大):包络输入 + 电平表
-            var framePeak: Float = 0
+                envelope = framePeak > envelope ? framePeak : envelope * envDecayCoeff
+
+                let target: Float = (!gateEnabled || envelope >= gateThreshold) ? 1 : 0
+                let coeff = target > gateGain ? gateAttackCoeff : gateReleaseCoeff
+                gateGain += (target - gateGain) * coeff
+
+                if rampRemaining > 0 {
+                    volumeCurrent += rampStep
+                    rampRemaining -= 1
+                    if rampRemaining == 0 { volumeCurrent = volumeTarget }
+                }
+                gainScratch[i] = volumeCurrent * gateGain
+            }
+            // 第二遍:逐声道应用增益 + 软限幅
             for c in 0..<channels {
-                let v = buffer[base + c]
-                let a = v < 0 ? -v : v
-                if a > framePeak { framePeak = a }
+                let p = dsts[c]
+                for i in 0..<n {
+                    let y = softClip(p[f + i] * gainScratch[i])
+                    p[f + i] = y
+                    let a = y < 0 ? -y : y
+                    if a > outPeak { outPeak = a }
+                }
             }
-            if framePeak > inPeak { inPeak = framePeak }
-
-            envelope = framePeak > envelope ? framePeak : envelope * envDecayCoeff
-
-            // 噪声门开合度:开 → attack(快),关 → release(慢),避免门开关产生爆音
-            let target: Float = (!gateEnabled || envelope >= gateThreshold) ? 1 : 0
-            let coeff = target > gateGain ? gateAttackCoeff : gateReleaseCoeff
-            gateGain += (target - gateGain) * coeff
-
-            // 音量线性斜坡
-            if rampRemaining > 0 {
-                volumeCurrent += rampStep
-                rampRemaining -= 1
-                if rampRemaining == 0 { volumeCurrent = volumeTarget }
-            }
-            let gain = volumeCurrent * gateGain
-
-            for c in 0..<channels {
-                let y = softClip(buffer[base + c] * gain)
-                buffer[base + c] = y
-                let a = y < 0 ? -y : y
-                if a > outPeak { outPeak = a }
-            }
+            f += n
         }
         inputPeak = inPeak
         outputPeak = outPeak
