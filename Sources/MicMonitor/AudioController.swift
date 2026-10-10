@@ -16,6 +16,7 @@ final class MeterState: @unchecked Sendable {
     let gateThresholdBits = Atomic<UInt32>(Float(0).bitPattern) // 线性幅度阈值
     let inputPeakBits = Atomic<UInt32>(Float(0).bitPattern)     // 采集端输入峰值
     let gateGainBits = Atomic<UInt32>(Float(1).bitPattern)      // 噪声门开合度
+    let feedbackGainBits = Atomic<UInt32>(Float(1).bitPattern)  // 啸叫守护当前增益(<1 表示正在压制)
     let bufferedFrames = Atomic<Int>(0)                       // 播放端环形缓冲水位
     let convertErrors = Atomic<Int>(0)
 }
@@ -121,6 +122,7 @@ final class AudioController: ObservableObject {
             guard oldValue != selectedInputUID else { return }
             settings.inputUID = selectedInputUID
             updateBluetoothWarning()
+            lowLatencyFallbackDone = false  // 换设备后重新允许低延迟自检
             if isRunning { scheduleRebuild("切换输入设备") }
         }
     }
@@ -129,6 +131,7 @@ final class AudioController: ObservableObject {
             guard oldValue != selectedOutputUID else { return }
             settings.outputUID = selectedOutputUID
             updateBluetoothWarning()
+            lowLatencyFallbackDone = false  // 换设备后重新允许低延迟自检
             if isRunning { scheduleRebuild("切换输出设备") }
         }
     }
@@ -148,11 +151,12 @@ final class AudioController: ObservableObject {
     @Published var gateThresholdDB: Float = -50 {
         didSet { pushThreshold(); settings.gateThresholdDB = gateThresholdDB }
     }
-    /// 低延迟模式:请求 128 帧 IO 缓冲并把水位压到 ~3 块,端到端延迟 ~15ms;
-    /// 关掉则回到系统默认缓冲(常见于 USB/蓝牙设备欠载较多时)
+    /// 低延迟模式:请求 256 帧 IO 缓冲并把水位压到 ~5 块,端到端延迟 ~27ms;
+    /// 关掉则回到系统默认缓冲。若设备跟不上小缓冲,启动自检会自动关闭此项并提示。
     @Published var lowLatency = true {
         didSet {
             settings.lowLatency = lowLatency
+            if lowLatency { lowLatencyFallbackDone = false }  // 用户手动重新开启,允许再次自检
             if isRunning { scheduleRebuild("切换低延迟模式") }
         }
     }
@@ -167,6 +171,7 @@ final class AudioController: ObservableObject {
     // 电平/状态(UI 定时刷新)
     @Published var inputLevel: Float = 0
     @Published var gateGain: Float = 1
+    @Published var feedbackGain: Float = 1
     @Published var bufferedMS: Double = 0
     @Published var underrunCount = 0
     @Published var overflowCount = 0
@@ -194,6 +199,10 @@ final class AudioController: ObservableObject {
     private var suppressedConfigChanges = 0
     /// 低延迟模式改过的设备 IO 缓冲原值 (deviceID, isInput, 原帧数),stopPipeline 时恢复
     private var ioBufferOriginals: [(AudioDeviceID, Bool, UInt32)] = []
+    /// 低延迟模式启动自检:2s 内欠载次数若超过阈值,说明该设备跟不上小缓冲,自动回退标准模式。
+    /// 每次用户手动开启/换设备时重置,避免无限重试循环。
+    private var lowLatencyCheckTask: Task<Void, Never>?
+    private var lowLatencyFallbackDone = false
     private var sampleRate = 48000.0
     private var outputChannelCount = 2
     // ring 随引擎重建,旧计数在这里累计
@@ -250,6 +259,7 @@ final class AudioController: ObservableObject {
         if on {
             isEnabled = true
             pendingAutoResume = false
+            lowLatencyFallbackDone = false  // 每次重新开启,允许低延迟自检重新评估
             Task { await requestPermissionAndStart() }
         } else {
             isEnabled = false
@@ -349,6 +359,28 @@ final class AudioController: ObservableObject {
         if wasWaiting { errorMessage = nil }
         log.log("直通开启:输入[\(inDev?.name ?? "系统默认")] → 输出[\(outDev?.name ?? "系统默认")],"
             + " 输出 \(Int(sampleRate))Hz × \(outputChannelCount)ch,目标水位 \(ring?.targetWater ?? 0) 帧")
+        scheduleLowLatencyCheck()
+    }
+
+    /// 低延迟模式自检:启动 2s 后看欠载次数是否异常。
+    /// 两个独立引擎在小缓冲下对该设备/系统负载撑不住时,欠载会接近 100% 的块都发生
+    /// (实测过 61334 次/165s,相当于持续输出静音却完全无感知)。
+    /// 一旦判定不稳定,自动关闭低延迟模式回退标准缓冲,避免用户反复手动试错。
+    private func scheduleLowLatencyCheck() {
+        lowLatencyCheckTask?.cancel()
+        guard lowLatency, !lowLatencyFallbackDone else { return }
+        let ringRef = ring
+        lowLatencyCheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, !Task.isCancelled, self.isRunning, let ringRef, ringRef === self.ring else { return }
+            let events = ringRef.underrunEvents.load(ordering: .relaxed)
+            // 2s 内阈值:正常运行偶有个位数欠载(启动预填充等),大幅异常才回退
+            guard events > 200 else { return }
+            self.log.log("低延迟模式 2s 内欠载 \(events) 次,判定设备跟不上小缓冲,自动回退标准缓冲")
+            self.lowLatencyFallbackDone = true
+            self.errorMessage = "检测到音频不稳定,已自动切换为标准缓冲模式(可能是设备不支持低延迟小缓冲)。"
+            self.lowLatency = false
+        }
     }
 
     private func buildPlaybackEngine(output: AudioDeviceInfo?) throws {
@@ -364,10 +396,12 @@ final class AudioController: ObservableObject {
             guard status == noErr else { throw PipelineError.os("设置输出设备失败", status) }
         }
 
-        // 低延迟:请求输出设备 IO 缓冲压到 128 帧(设备可拒绝,读回实际值算水位)
+        // 低延迟:请求输出设备 IO 缓冲压到 256 帧(设备可拒绝,读回实际值算水位)。
+        // 之前试过 128 帧,在双引擎(输入输出各自独立时钟)架构下余量太小,
+        // 实测几乎每块都欠载(61334 次/165s ≈ 100% 欠载率),等于一直在放静音。
         let outID = output?.id ?? CoreAudioUtil.defaultDeviceID(input: false)
         let ioFrames = lowLatency && outID != 0
-            ? requestIOBufferFrames(outID, input: false, wanted: 128)
+            ? requestIOBufferFrames(outID, input: false, wanted: 256)
             : Int(CoreAudioUtil.bufferFrameSize(outID, input: false) ?? 512)
 
         let sr = (output?.nominalSampleRate ?? 0) > 0 ? output!.nominalSampleRate : 48000
@@ -381,10 +415,11 @@ final class AudioController: ObservableObject {
         outputChannelCount = ch
         canonicalFormat = canonical
 
-        // 环形缓冲:容量 ~0.4s;水位跟随实际 IO 缓冲——目标 ≈3 块,高水位 8 块
+        // 环形缓冲:容量 ~0.4s;水位跟随实际 IO 缓冲——目标 ≈5 块,高水位 12 块
+        // (两个引擎时钟独立,块数太少会被时钟抖动/调度延迟直接打穿导致持续欠载)
         let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.4), 8192), channelCount: ch,
-                                 targetWater: max(256, ioFrames * 3),
-                                 highWater: max(1024, ioFrames * 8))
+                                 targetWater: max(512, ioFrames * 5),
+                                 highWater: max(2048, ioFrames * 12))
         ring = ringBuf
         let ctx = RenderContext(ring: ringBuf, shared: meter, channelCount: ch, sampleRate: sr)
         ctx.dsp.reset()
@@ -425,13 +460,13 @@ final class AudioController: ObservableObject {
         // 低延迟:输入侧同样请求小 IO 缓冲;tap 的 bufferSize 只是请求值,实际回调块大小以设备为准
         let inID = input?.id ?? CoreAudioUtil.defaultDeviceID(input: true)
         if lowLatency, inID != 0 {
-            _ = requestIOBufferFrames(inID, input: true, wanted: 128)
+            _ = requestIOBufferFrames(inID, input: true, wanted: 256)
         }
 
         let ctx = CaptureContext(ring: ring, shared: meter, canonicalFormat: canonical,
                                  channelCount: outputChannelCount, prefillFrames: ring.targetWater)
         // format: nil → 使用设备原生输入格式,在回调内做格式转换
-        inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 128 : 512, format: nil) { buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 256 : 512, format: nil) { buffer, _ in
             Self.tap(ctx: ctx, buffer: buffer)
         }
         engine.prepare()
@@ -618,6 +653,7 @@ final class AudioController: ObservableObject {
         isSilence.pointee = ObjCBool(!gotAny)
         shared.bufferedFrames.store(ctx.ring.availableFrames, ordering: .relaxed)
         shared.gateGainBits.store(ctx.dsp.gateGain.bitPattern, ordering: .relaxed)
+        shared.feedbackGainBits.store(ctx.dsp.feedbackGain.bitPattern, ordering: .relaxed)
         return noErr
     }
 
@@ -640,6 +676,8 @@ final class AudioController: ObservableObject {
         configObservers.removeAll()
         rebuildTask?.cancel()
         rebuildTask = nil
+        lowLatencyCheckTask?.cancel()
+        lowLatencyCheckTask = nil
 
         accumulateCounters()
         if let cap = captureEngine {
@@ -760,6 +798,7 @@ final class AudioController: ObservableObject {
         let peak = Float(bitPattern: meter.inputPeakBits.load(ordering: .relaxed))
         inputLevel = max(peak, inputLevel * 0.8)  // UI 侧峰值保持衰减
         gateGain = Float(bitPattern: meter.gateGainBits.load(ordering: .relaxed))
+        feedbackGain = Float(bitPattern: meter.feedbackGainBits.load(ordering: .relaxed))
         bufferedMS = Double(meter.bufferedFrames.load(ordering: .relaxed)) / sampleRate * 1000
         if let ring {
             underrunCount = accUnderrun + ring.underrunEvents.load(ordering: .relaxed)
@@ -856,9 +895,10 @@ final class AudioController: ObservableObject {
             + "\(pendingAutoResume ? " / 等待设备重连" : "")")
         lines.append("输入:\(settings.inputUID.isEmpty ? "系统默认(\(defaultInputName))" : settings.inputUID)")
         lines.append("输出:\(settings.outputUID.isEmpty ? "系统默认(\(defaultOutputName))" : settings.outputUID)")
-        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB",
+        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@",
                             Int(volume * 100), muted.description,
-                            gateEnabled.description, gateThresholdDB))
+                            gateEnabled.description, gateThresholdDB, lowLatency.description))
+        lines.append(String(format: "啸叫守护增益 %d%%", Int(feedbackGain * 100)))
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",
                             sampleRate, outputChannelCount, bufferedMS))
         lines.append("欠载 \(underrunCount) 次 · 溢出丢弃 \(overflowCount) 次 · 重建 \(restartCount) 次"

@@ -105,4 +105,49 @@ struct DSPTests {
         process(dsp, &data)
         #expect(dsp.gateGain < 0.01)
     }
+
+    /// 持续顶满(模拟啸叫/反馈环路)应被自动压低增益,避免"嘟嘟嘟"反复削顶
+    @Test func feedbackGovernorDucksSustainedClipping() {
+        let dsp = DSPEngine()
+        dsp.updateGate(enabled: false, threshold: 0, sampleRate: 48000)
+        dsp.setVolume(2, rampFrames: 1)
+        // 分多个小块喂入持续满幅信号,模拟渲染回调逐块调用(每块触发一次守护更新)
+        var peakAfterDuck: Float = 1
+        for _ in 0..<40 {
+            var block = [[Float](repeating: 0.95, count: 256)]
+            process(dsp, &block)
+            peakAfterDuck = block[0].map { abs($0) }.max() ?? 1
+        }
+        #expect(dsp.feedbackGain < 0.5)
+        // 守护是闭环调节,稳态会在阈值附近"找平衡"(类似限幅器 hunting),
+        // 不追求打到很低,只要求明显低于未受控时的满幅限幅输出(~0.999)
+        #expect(peakAfterDuck < 0.85)
+    }
+
+    /// 单次瞬态响动(如拍手)不应触发守护,避免误伤正常大声说话
+    @Test func feedbackGovernorIgnoresSingleTransient() {
+        let dsp = DSPEngine()
+        dsp.updateGate(enabled: false, threshold: 0, sampleRate: 48000)
+        var loud = [[Float](repeating: 0.9, count: 64)]   // 一个很短的块
+        process(dsp, &loud)
+        #expect(dsp.feedbackGain > 0.9)
+    }
+
+    /// 停止持续顶满后,守护增益应缓慢恢复到 1
+    @Test func feedbackGovernorRecovers() {
+        let dsp = DSPEngine()
+        dsp.updateGate(enabled: false, threshold: 0, sampleRate: 48000)
+        dsp.setVolume(2, rampFrames: 1)
+        for _ in 0..<40 {
+            var block = [[Float](repeating: 0.95, count: 256)]
+            process(dsp, &block)
+        }
+        #expect(dsp.feedbackGain < 0.5)
+        dsp.setVolume(0.1, rampFrames: 1)   // 回到安全音量,不再顶限幅
+        for _ in 0..<300 {
+            var block = [[Float](repeating: 0.1, count: 256)]
+            process(dsp, &block)
+        }
+        #expect(dsp.feedbackGain > 0.9)
+    }
 }

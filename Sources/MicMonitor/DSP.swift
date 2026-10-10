@@ -25,6 +25,22 @@ final class DSPEngine: @unchecked Sendable {
     private(set) var inputPeak: Float = 0
     private(set) var outputPeak: Float = 0
 
+    // ---- 啸叫守护(feedback governor) ----
+    // 麦克风离输出设备太近(典型如耳机线控麦克风紧贴发声单元)会形成声学/电气反馈环:
+    // 增益在环路里不断放大 → 顶到软限幅 → 能量跌落 → 再爬升,听起来像"嘟嘟嘟"的拖拉机声。
+    // 这与延迟/缓冲无关,必须单独检测并自动压低增益打断环路,原理类似专业音响的 howling suppression。
+    // 判据:输出端包络持续贴着限幅拐点(说明环路能量在爆发式增长),
+    // 用快起慢落的包络跟踪,一旦判定正在啸叫就快速把 feedbackGain 打下去,环路增益低于 1 后振荡自然停止;
+    // 安静下来后再缓慢(几秒)恢复到 1,避免反复开关导致新的"嘟嘟"。
+    private(set) var feedbackGain: Float = 1
+    /// 块级平滑包络(不是逐样本):需要连续若干块维持高电平才会触发,
+    /// 避免拍手/关门这类瞬态响动被误判成啸叫。
+    private var feedbackEnvelope: Float = 0
+    private let feedbackEnvCoeff: Float = 0.25    // 包络跟踪速度:约几十毫秒达到稳态
+    private let feedbackThreshold: Float = 0.75   // 略低于 softClip 拐点(0.8),提前介入
+    private let feedbackDuckStep: Float = 0.3     // 判定啸叫时,每块把增益再砍掉的比例(快速压下)
+    private let feedbackRecoverStep: Float = 0.01 // 未判定啸叫时,每块缓慢恢复的量(约 2~3 秒恢复到 1)
+
     /// 逐帧总增益系数暂存(音量 × 门开合度),init 预分配;超过则分块处理
     private let gainScratch: UnsafeMutableBufferPointer<Float>
 
@@ -90,7 +106,7 @@ final class DSPEngine: @unchecked Sendable {
                     rampRemaining -= 1
                     if rampRemaining == 0 { volumeCurrent = volumeTarget }
                 }
-                gainScratch[i] = volumeCurrent * gateGain
+                gainScratch[i] = volumeCurrent * gateGain * feedbackGain
             }
             // 第二遍:逐声道应用增益 + 软限幅
             for c in 0..<channels {
@@ -106,6 +122,14 @@ final class DSPEngine: @unchecked Sendable {
         }
         inputPeak = inPeak
         outputPeak = outPeak
+
+        // 啸叫守护:块级更新,一个 process() 调用(通常就是一个渲染块)更新一次
+        feedbackEnvelope += (outPeak - feedbackEnvelope) * feedbackEnvCoeff
+        if feedbackEnvelope > feedbackThreshold {
+            feedbackGain = max(0.05, feedbackGain * (1 - feedbackDuckStep))
+        } else {
+            feedbackGain = min(1, feedbackGain + feedbackRecoverStep)
+        }
         return inPeak
     }
 
@@ -117,6 +141,8 @@ final class DSPEngine: @unchecked Sendable {
         envelope = 0
         inputPeak = 0
         outputPeak = 0
+        feedbackGain = 1
+        feedbackEnvelope = 0
     }
 }
 

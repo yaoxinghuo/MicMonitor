@@ -40,6 +40,13 @@ struct MenuPanelView: View {
                 .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
             }
 
+            if c.feedbackGain < 0.9 {
+                Text("检测到啸叫(麦克风拾取了耳机的声音),已自动降低音量至 \(Int(c.feedbackGain * 100))%。"
+                    + "建议换用离耳机更远的麦克风(如笔记本内置麦克风),或调低混入音量。")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
             if c.showBluetoothWarning {
                 Text("输入和输出是同一台蓝牙设备:使用它的麦克风会把耳机切换到通话模式(HFP),音乐音质会明显下降。建议选择内置麦克风。")
                     .font(.caption)
