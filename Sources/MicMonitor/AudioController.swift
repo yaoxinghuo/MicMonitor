@@ -148,6 +148,14 @@ final class AudioController: ObservableObject {
     @Published var gateThresholdDB: Float = -50 {
         didSet { pushThreshold(); settings.gateThresholdDB = gateThresholdDB }
     }
+    /// 低延迟模式:请求 128 帧 IO 缓冲并把水位压到 ~3 块,端到端延迟 ~15ms;
+    /// 关掉则回到系统默认缓冲(常见于 USB/蓝牙设备欠载较多时)
+    @Published var lowLatency = true {
+        didSet {
+            settings.lowLatency = lowLatency
+            if isRunning { scheduleRebuild("切换低延迟模式") }
+        }
+    }
 
     /// 面板副标题:期望开启但未在运行时的说明
     var pendingResumeText: String? {
@@ -184,6 +192,8 @@ final class AudioController: ObservableObject {
     /// 真正的拔插事件由 kAudioHardwarePropertyDevices 监听兜底,不依赖此通知。
     private var suppressConfigChangesUntil = Date.distantPast
     private var suppressedConfigChanges = 0
+    /// 低延迟模式改过的设备 IO 缓冲原值 (deviceID, isInput, 原帧数),stopPipeline 时恢复
+    private var ioBufferOriginals: [(AudioDeviceID, Bool, UInt32)] = []
     private var sampleRate = 48000.0
     private var outputChannelCount = 2
     // ring 随引擎重建,旧计数在这里累计
@@ -204,6 +214,7 @@ final class AudioController: ObservableObject {
         muted = settings.muted
         gateEnabled = settings.gateEnabled
         gateThresholdDB = settings.gateThresholdDB
+        lowLatency = settings.lowLatency
         pushGain()
         pushThreshold()
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
@@ -353,6 +364,12 @@ final class AudioController: ObservableObject {
             guard status == noErr else { throw PipelineError.os("设置输出设备失败", status) }
         }
 
+        // 低延迟:请求输出设备 IO 缓冲压到 128 帧(设备可拒绝,读回实际值算水位)
+        let outID = output?.id ?? CoreAudioUtil.defaultDeviceID(input: false)
+        let ioFrames = lowLatency && outID != 0
+            ? requestIOBufferFrames(outID, input: false, wanted: 128)
+            : Int(CoreAudioUtil.bufferFrameSize(outID, input: false) ?? 512)
+
         let sr = (output?.nominalSampleRate ?? 0) > 0 ? output!.nominalSampleRate : 48000
         let ch = max(1, min(8, output?.outputChannels ?? 2))
         // 必须非交错:AVAudioMixerNode 输入不接受 interleaved(-10868),planar 也是引擎原生布局
@@ -364,9 +381,10 @@ final class AudioController: ObservableObject {
         outputChannelCount = ch
         canonicalFormat = canonical
 
-        // 环形缓冲:容量 ~0.4s;目标水位 ≈ 2.5 个 512 帧块(~26ms@48k),高水位 6 块
+        // 环形缓冲:容量 ~0.4s;水位跟随实际 IO 缓冲——目标 ≈3 块,高水位 8 块
         let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.4), 8192), channelCount: ch,
-                                 targetWater: 1280, highWater: 3072)
+                                 targetWater: max(256, ioFrames * 3),
+                                 highWater: max(1024, ioFrames * 8))
         ring = ringBuf
         let ctx = RenderContext(ring: ringBuf, shared: meter, channelCount: ch, sampleRate: sr)
         ctx.dsp.reset()
@@ -404,10 +422,16 @@ final class AudioController: ObservableObject {
             guard status == noErr else { throw PipelineError.os("设置输入设备失败", status) }
         }
 
+        // 低延迟:输入侧同样请求小 IO 缓冲;tap 的 bufferSize 只是请求值,实际回调块大小以设备为准
+        let inID = input?.id ?? CoreAudioUtil.defaultDeviceID(input: true)
+        if lowLatency, inID != 0 {
+            _ = requestIOBufferFrames(inID, input: true, wanted: 128)
+        }
+
         let ctx = CaptureContext(ring: ring, shared: meter, canonicalFormat: canonical,
                                  channelCount: outputChannelCount, prefillFrames: ring.targetWater)
         // format: nil → 使用设备原生输入格式,在回调内做格式转换
-        inputNode.installTap(onBus: 0, bufferSize: 512, format: nil) { buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 128 : 512, format: nil) { buffer, _ in
             Self.tap(ctx: ctx, buffer: buffer)
         }
         engine.prepare()
@@ -420,6 +444,23 @@ final class AudioController: ObservableObject {
         return AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_CurrentDevice,
                                     kAudioUnitScope_Global, 0, &id,
                                     UInt32(MemoryLayout<AudioDeviceID>.size))
+    }
+
+    /// 低延迟模式:请求设备 IO 缓冲为 wanted 帧,记录原值供 stopPipeline 恢复,返回实际生效帧数
+    private func requestIOBufferFrames(_ deviceID: AudioDeviceID, input: Bool, wanted: UInt32) -> Int {
+        guard let current = CoreAudioUtil.bufferFrameSize(deviceID, input: input) else { return 512 }
+        if current > wanted {
+            if CoreAudioUtil.setBufferFrameSize(deviceID, input: input, frames: wanted) {
+                ioBufferOriginals.append((deviceID, input, current))
+            } else {
+                log.log("请求 IO 缓冲 \(wanted) 帧失败,维持 \(current) 帧")
+            }
+        }
+        let actual = CoreAudioUtil.bufferFrameSize(deviceID, input: input) ?? current
+        if actual != current {
+            log.log("\(input ? "输入" : "输出")设备 IO 缓冲:\(current) → \(actual) 帧")
+        }
+        return Int(actual)
     }
 
     // MARK: - 音频线程回调(禁止分配/锁/日志)
@@ -608,6 +649,11 @@ final class AudioController: ObservableObject {
         playbackEngine?.stop()
         captureEngine = nil
         playbackEngine = nil
+        // 恢复被低延迟模式改过的设备 IO 缓冲
+        for (devID, isInput, frames) in ioBufferOriginals {
+            _ = CoreAudioUtil.setBufferFrameSize(devID, input: isInput, frames: frames)
+        }
+        ioBufferOriginals.removeAll()
         ring = nil
         canonicalFormat = nil
         isRunning = false

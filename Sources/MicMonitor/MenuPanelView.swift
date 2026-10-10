@@ -93,6 +93,11 @@ struct MenuPanelView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
+            Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
+            Text("启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             Divider()
 
             Toggle("开机自启", isOn: Binding(

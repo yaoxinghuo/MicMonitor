@@ -85,6 +85,28 @@ enum CoreAudioUtil {
                  type: AudioDeviceID.self) ?? 0
     }
 
+    /// 设备当前 IO 缓冲帧数(优先方向 scope,内置设备上有些属性挂在全局 scope)
+    static func bufferFrameSize(_ device: AudioDeviceID, input: Bool) -> UInt32? {
+        let scope = input ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput
+        return property(device, kAudioDevicePropertyBufferFrameSize, scope: scope, type: UInt32.self)
+            ?? property(device, kAudioDevicePropertyBufferFrameSize, type: UInt32.self)
+    }
+
+    /// 请求修改设备 IO 缓冲帧数。这只是"请求":USB/蓝牙等设备可拒绝或取整,须读回实际值。
+    static func setBufferFrameSize(_ device: AudioDeviceID, input: Bool, frames: UInt32) -> Bool {
+        var wanted = frames
+        let scope = input ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput
+        var addr = address(kAudioDevicePropertyBufferFrameSize, scope: scope)
+        var status = AudioObjectSetPropertyData(device, &addr, 0, nil,
+                                                UInt32(MemoryLayout<UInt32>.size), &wanted)
+        if status != noErr {
+            addr = address(kAudioDevicePropertyBufferFrameSize)
+            status = AudioObjectSetPropertyData(device, &addr, 0, nil,
+                                                UInt32(MemoryLayout<UInt32>.size), &wanted)
+        }
+        return status == noErr
+    }
+
     /// 某方向上的声道总数:读取 StreamConfiguration 中全部 buffer 的 mNumberChannels 之和
     static func channelCount(_ device: AudioDeviceID, input: Bool) -> Int {
         var addr = address(kAudioDevicePropertyStreamConfiguration,

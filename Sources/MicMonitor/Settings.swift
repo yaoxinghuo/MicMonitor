@@ -13,6 +13,7 @@ final class Settings {
         static let muted = "muted"
         static let gateEnabled = "gateEnabled"
         static let gateThresholdDB = "gateThresholdDB"
+        static let lowLatency = "lowLatency"      // 低延迟模式(默认开):请求小 IO 缓冲
         static let wasRunning = "wasRunning"
         static let hasLaunched = "hasLaunched"
     }
@@ -40,6 +41,11 @@ final class Settings {
     var gateThresholdDB: Float {
         get { d.object(forKey: K.gateThresholdDB) != nil ? d.float(forKey: K.gateThresholdDB) : -50 }
         set { d.set(newValue, forKey: K.gateThresholdDB) }
+    }
+    /// 低延迟模式默认开启:只在用户明确关掉时才持久化为 false
+    var lowLatency: Bool {
+        get { d.object(forKey: K.lowLatency) != nil ? d.bool(forKey: K.lowLatency) : true }
+        set { d.set(newValue, forKey: K.lowLatency) }
     }
     var wasRunning: Bool {
         get { d.bool(forKey: K.wasRunning) }
