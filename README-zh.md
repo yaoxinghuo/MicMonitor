@@ -5,7 +5,7 @@
 macOS 菜单栏小工具:把麦克风声音**实时直通**到你选定的输出设备(耳机),并可调节混入音量。
 适合"戴着降噪耳机听歌,听不到同事叫你"的场景——音乐仍由系统正常播放,本应用只额外叠加麦克风声音。
 
-<img width="700" height="1010" alt="image" src="https://github.com/user-attachments/assets/e77f4ab7-6885-44e7-9a95-0efa444cb720" />
+<img width="700" height="1066" alt="image" src="https://github.com/user-attachments/assets/1b3af51e-517b-432c-9711-e286d8948b90" />
 
 - 菜单栏常驻图标(可选开启 Dock 图标,点击弹出设置窗口)
 - 可分别选择输入(麦克风)与输出(耳机)设备,默认跟随系统
