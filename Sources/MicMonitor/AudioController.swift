@@ -123,6 +123,7 @@ final class AudioController: ObservableObject {
             settings.inputUID = selectedInputUID
             updateBluetoothWarning()
             lowLatencyFallbackDone = false  // 换设备后重新允许低延迟自检
+            bufferScale = 1.0               // 新设备可能不需要之前的自适应放大
             if isRunning { scheduleRebuild("切换输入设备") }
         }
     }
@@ -132,6 +133,7 @@ final class AudioController: ObservableObject {
             settings.outputUID = selectedOutputUID
             updateBluetoothWarning()
             lowLatencyFallbackDone = false  // 换设备后重新允许低延迟自检
+            bufferScale = 1.0               // 新设备可能不需要之前的自适应放大
             if isRunning { scheduleRebuild("切换输出设备") }
         }
     }
@@ -176,6 +178,7 @@ final class AudioController: ObservableObject {
     @Published var underrunCount = 0
     @Published var overflowCount = 0
     @Published var restartCount = 0
+    @Published private(set) var bufferScaleDisplay: Double = 1.0
 
     // MARK: - 内部
     private let settings = Settings.shared
@@ -208,6 +211,15 @@ final class AudioController: ObservableObject {
     /// 每次用户手动开启/换设备时重置,避免无限重试循环。
     private var lowLatencyCheckTask: Task<Void, Never>?
     private var lowLatencyFallbackDone = false
+    /// 自适应缓冲:某些设备(典型如廉价 USB 耳机)时钟抖动大,聚合设备的漂移补偿
+    /// 也压不住,固定缓冲大小猜不准。改为持续监测欠载/溢出率,不稳定就自动把
+    /// 水位倍数调大一档重建,直到稳定或到达上限;比让用户手动试缓冲大小靠谱。
+    private var bufferScale: Double = 1.0 {
+        didSet { bufferScaleDisplay = bufferScale }
+    }
+    private let maxBufferScale: Double = 6.0
+    private var healthCheckTask: Task<Void, Never>?
+    private var healthSnapshotEvents = 0
     private var sampleRate = 48000.0
     private var outputChannelCount = 2
     // ring 随引擎重建,旧计数在这里累计
@@ -390,6 +402,8 @@ final class AudioController: ObservableObject {
             + " 输出 \(Int(sampleRate))Hz × \(outputChannelCount)ch,目标水位 \(ring?.targetWater ?? 0) 帧"
             + (unifiedEngine != nil ? " [聚合模式]" : " [双引擎模式]"))
         scheduleLowLatencyCheck()
+        healthSnapshotEvents = 0
+        scheduleBufferHealthCheck()
     }
 
     /// 双引擎兜底路径:独立采集引擎 + 独立播放引擎(各自绑定设备)
@@ -436,10 +450,11 @@ final class AudioController: ObservableObject {
         outputChannelCount = ch
         canonicalFormat = canonical
 
-        // 同一时钟域,水位只需覆盖调度抖动:目标 ≈3 块,高水位 8 块
-        let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.4), 8192), channelCount: ch,
-                                 targetWater: max(512, ioFrames * 3),
-                                 highWater: max(2048, ioFrames * 8))
+        // 同一时钟域,水位只需覆盖调度抖动:目标 ≈3 块,高水位 8 块;
+        // bufferScale 由运行时自适应健康检查按需放大(应对 USB 等时钟抖动较大的设备)
+        let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.8 * bufferScale), 8192), channelCount: ch,
+                                 targetWater: max(512, Int(Double(ioFrames * 3) * bufferScale)),
+                                 highWater: max(2048, Int(Double(ioFrames * 8) * bufferScale)))
         ring = ringBuf
 
         let rctx = RenderContext(ring: ringBuf, shared: meter, channelCount: ch, sampleRate: sr)
@@ -484,6 +499,38 @@ final class AudioController: ObservableObject {
         }
     }
 
+    /// 自适应缓冲健康检查:持续每 3s 看一次欠载+溢出增量。
+    /// 某些设备(典型如廉价 USB 耳机)时钟抖动大,固定缓冲猜不准、聚合设备的
+    /// 漂移补偿也压不住,表现为持续的断续卡顿(不是啸叫,与音量无关)。
+    /// 一旦判定不稳定就把 bufferScale 调大一档并重建,循环直到稳定或到上限;
+    /// 不在这里尝试自动调小(避免和"判定不稳定→调大"来回震荡)。
+    private func scheduleBufferHealthCheck() {
+        healthCheckTask?.cancel()
+        guard bufferScale < maxBufferScale else { return }
+        let ringRef = ring
+        healthCheckTask = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, !Task.isCancelled, self.isRunning,
+                      let ringRef, ringRef === self.ring else { return }
+                let events = ringRef.underrunEvents.load(ordering: .relaxed)
+                        + ringRef.overflowEvents.load(ordering: .relaxed)
+                let delta = events - self.healthSnapshotEvents
+                self.healthSnapshotEvents = events
+                guard delta > 30 else { continue }   // 偶发个位数属正常抖动,不处理
+                guard self.bufferScale < self.maxBufferScale else {
+                    self.log.log("缓冲已达上限(×\(self.bufferScale)),仍有欠载 \(delta) 次/3s,设备可能本身不稳定")
+                    return
+                }
+                self.bufferScale = min(self.maxBufferScale, self.bufferScale * 1.8)
+                self.log.log("3s 内欠载+溢出 \(delta) 次,自动放大缓冲至 ×\(String(format: "%.1f", self.bufferScale)) 并重建")
+                self.errorMessage = "检测到音频不稳定,已自动增大缓冲(延迟会略增)。"
+                self.scheduleRebuild("自适应缓冲放大")
+                return   // 新管线启动后会重新调度一次健康检查
+            }
+        }
+    }
+
     private func buildPlaybackEngine(output: AudioDeviceInfo?) throws {
         let engine = AVAudioEngine()
         engine.isAutoShutdownEnabled = false
@@ -518,9 +565,9 @@ final class AudioController: ObservableObject {
 
         // 环形缓冲:容量 ~0.4s;水位跟随实际 IO 缓冲——目标 ≈5 块,高水位 12 块
         // (两个引擎时钟独立,块数太少会被时钟抖动/调度延迟直接打穿导致持续欠载)
-        let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.4), 8192), channelCount: ch,
-                                 targetWater: max(512, ioFrames * 5),
-                                 highWater: max(2048, ioFrames * 12))
+        let ringBuf = RingBuffer(capacityFrames: max(Int(sr * 0.8 * bufferScale), 8192), channelCount: ch,
+                                 targetWater: max(512, Int(Double(ioFrames * 5) * bufferScale)),
+                                 highWater: max(2048, Int(Double(ioFrames * 12) * bufferScale)))
         ring = ringBuf
         let ctx = RenderContext(ring: ringBuf, shared: meter, channelCount: ch, sampleRate: sr)
         ctx.dsp.reset()
@@ -779,6 +826,8 @@ final class AudioController: ObservableObject {
         rebuildTask = nil
         lowLatencyCheckTask?.cancel()
         lowLatencyCheckTask = nil
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
 
         accumulateCounters()
         if let cap = captureEngine {
@@ -1014,7 +1063,8 @@ final class AudioController: ObservableObject {
         lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@",
                             Int(volume * 100), muted.description,
                             gateEnabled.description, gateThresholdDB, lowLatency.description))
-        lines.append(String(format: "啸叫守护增益 %d%%", Int(feedbackGain * 100)))
+        lines.append(String(format: "啸叫守护增益 %d%% 自适应缓冲倍数 ×%.1f",
+                            Int(feedbackGain * 100), bufferScale))
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",
                             sampleRate, outputChannelCount, bufferedMS))
         lines.append("欠载 \(underrunCount) 次 · 溢出丢弃 \(overflowCount) 次 · 重建 \(restartCount) 次"

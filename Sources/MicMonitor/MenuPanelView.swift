@@ -120,6 +120,11 @@ struct MenuPanelView: View {
             Text("缓冲 \(Int(c.bufferedMS)) ms · 欠载 \(c.underrunCount) · 丢弃 \(c.overflowCount) · 重建 \(c.restartCount)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            if c.bufferScaleDisplay > 1.01 {
+                Text("检测到设备不稳定,已自动将缓冲放大至 ×\(String(format: "%.1f", c.bufferScaleDisplay))(延迟增加,换取不再卡顿)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
 
             Divider()
 
