@@ -27,7 +27,7 @@ struct MenuPanelView: View {
                     .foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 18, alignment: .topLeading)
 
             if c.micPermissionDenied {
                 VStack(alignment: .leading, spacing: 4) {
