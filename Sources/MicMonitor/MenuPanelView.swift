@@ -107,6 +107,11 @@ struct MenuPanelView: View {
 
             Divider()
 
+            Toggle("在 Dock 中显示图标", isOn: $c.showDockIcon)
+            Text("开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             Toggle("开机自启", isOn: Binding(
                 get: { c.launchAtLogin },
                 set: { c.setLaunchAtLogin($0) }

@@ -14,6 +14,7 @@ final class Settings {
         static let gateEnabled = "gateEnabled"
         static let gateThresholdDB = "gateThresholdDB"
         static let lowLatency = "lowLatency"      // 低延迟模式(默认开):请求小 IO 缓冲
+        static let dockIcon = "dockIcon"          // Dock 图标模式:regular vs accessory
         static let wasRunning = "wasRunning"
         static let hasLaunched = "hasLaunched"
     }
@@ -50,6 +51,11 @@ final class Settings {
     var wasRunning: Bool {
         get { d.bool(forKey: K.wasRunning) }
         set { d.set(newValue, forKey: K.wasRunning) }
+    }
+    /// 是否在 Dock 显示图标(false = 纯菜单栏 accessory 模式)
+    var dockIcon: Bool {
+        get { d.bool(forKey: K.dockIcon) }
+        set { d.set(newValue, forKey: K.dockIcon) }
     }
     var hasLaunched: Bool {
         get { d.bool(forKey: K.hasLaunched) }

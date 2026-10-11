@@ -8,6 +8,7 @@ import CoreAudio
 import Foundation
 import ServiceManagement
 import Synchronization
+import SwiftUI
 
 /// 音频管线的跨线程共享状态:全部是原子量,实时音频线程与 UI 线程都可安全访问。
 final class MeterState: @unchecked Sendable {
@@ -162,6 +163,20 @@ final class AudioController: ObservableObject {
             if isRunning { scheduleRebuild("切换低延迟模式") }
         }
     }
+    /// Dock 图标模式:开 = regular(显示 Dock 图标,点击弹出面板窗口);
+    /// 关 = accessory(纯菜单栏)。LSUIElement 只是启动默认值,运行时可合法切换。
+    /// 菜单栏图标两种模式下都保留——它是常驻入口,否则 Dock 模式关窗后无入口可回。
+    @Published var showDockIcon = false {
+        didSet {
+            settings.dockIcon = showDockIcon
+            applyActivationPolicy()
+            if showDockIcon {
+                showPanelWindow()  // 立即弹窗给反馈,让用户看到效果
+            } else {
+                panelWindow?.close()  // Dock 入口没了,窗口留着会失去意义
+            }
+        }
+    }
 
     /// 面板副标题:期望开启但未在运行时的说明
     var pendingResumeText: String? {
@@ -196,6 +211,8 @@ final class AudioController: ObservableObject {
     private var ring: RingBuffer?
     private var canonicalFormat: AVAudioFormat?
     private var configObservers: [NSObjectProtocol] = []
+    /// Dock 模式下的面板窗口(懒建,关窗只隐藏不销毁,isReleasedWhenClosed=false)
+    private var panelWindow: NSWindow?
 
     private var pendingAutoResume = false
     private var rebuildTask: Task<Void, Never>?
@@ -243,6 +260,7 @@ final class AudioController: ObservableObject {
         gateEnabled = settings.gateEnabled
         gateThresholdDB = settings.gateThresholdDB
         lowLatency = settings.lowLatency
+        showDockIcon = settings.dockIcon
         pushGain()
         pushThreshold()
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
@@ -287,6 +305,37 @@ final class AudioController: ObservableObject {
             stopPipeline()
             errorMessage = nil
         }
+    }
+
+    // MARK: - Dock 图标模式
+
+    /// LSUIElement 只是 bundle 启动默认,运行时用 setActivationPolicy 切换是合法做法。
+    /// 需在 NSApplication 初始化完成后调用,所以 MicMonitorApp 在 onAppear 里触发。
+    func applyActivationPolicy() {
+        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+    }
+
+    /// Dock 模式下点图标(applicationShouldHandleReopen)或开关切换时调用:
+    /// 弹出一个普通窗口托管与菜单栏弹层同一个 MenuPanelView,设置天然共享。
+    func showPanelWindow() {
+        if let w = panelWindow, w.isVisible {
+            w.makeKeyAndOrderFront(nil)
+        } else {
+            let host = NSHostingController(rootView: MenuPanelView().environmentObject(self))
+            let w = NSWindow(contentViewController: host)
+            w.title = "MicMonitor"
+            w.styleMask = [.titled, .closable, .miniaturizable]
+            w.isReleasedWhenClosed = false  // 关窗只隐藏,再次点击不重进托管
+            w.center()
+            panelWindow = w
+            w.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// AppDelegate 转发:Dock 图标被点且当前没有可见窗口时调用
+    func handleDockReopen() {
+        if showDockIcon { showPanelWindow() }
     }
 
     private func requestPermissionAndStart() async {
