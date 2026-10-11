@@ -132,11 +132,13 @@ struct MenuPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // 整行等宽字体:空格与数字同宽,定宽补齐才真正不抖动
-            Text("缓冲 \(String(format: "%4d", Int(c.bufferedMS))) ms · 欠载 \(String(format: "%5d", c.underrunCount)) · 丢弃 \(String(format: "%5d", c.overflowCount)) · 重建 \(String(format: "%2d", c.restartCount))")
+            // 等宽字体 + 定宽数字字段,数值位数变化时整行不抖动;面板较窄,一行放两项
+            Text("缓冲 \(String(format: "%4d", Int(c.bufferedMS))) ms · 欠载 \(String(format: "%5d", c.underrunCount))")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text("丢弃 \(String(format: "%5d", c.overflowCount)) · 重建 \(String(format: "%2d", c.restartCount))")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
             if c.bufferScaleDisplay > 1.01 {
                 Text("检测到设备不稳定,已自动将缓冲放大至 ×\(String(format: "%.1f", c.bufferScaleDisplay))(延迟增加,换取不再卡顿)")
                     .font(.caption2)
