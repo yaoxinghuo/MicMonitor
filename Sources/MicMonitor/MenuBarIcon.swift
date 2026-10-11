@@ -6,10 +6,10 @@ import AppKit
 /// SVG 坐标系 y 向下,Cocoa y 向上:本文件内所有 y 值已做 y' = 18 − y 翻转。
 enum MenuBarIcon {
 
-    // 菜单栏图标视觉尺寸 ~22pt 较常见;原 18×18 设计稿有效内容只占 ~56% 高度,
-    // 放大 1.4× 后视觉占比 ~64%,与相邻系统/第三方图标比重对齐
+    // 菜单栏图标视觉尺寸 ~22pt;原 18×18 设计稿有效内容占 ~56% 高度,
+    // 放大 1.15× 后视觉占比 ~47%~58%(横向图标,以高度对齐邻居,1.4× 实测过大)
     private static let size = NSSize(width: 22, height: 22)
-    private static let artworkScale: CGFloat = 1.4
+    private static let artworkScale: CGFloat = 1.15
 
     /// 未生效:头梁弧线 + 两个描边耳罩(纯线条)
     static var off: NSImage = make { _ in
