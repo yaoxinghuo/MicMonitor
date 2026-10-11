@@ -102,6 +102,10 @@ final class RenderContext: @unchecked Sendable {
 
 @MainActor
 final class AudioController: ObservableObject {
+    /// 供 AppDelegate 取实例:不能在 App.init 里强转 wrappedValue(过早),
+    /// delegate 回调(applicationDidFinishLaunching/Reopen)时此引用已就绪。
+    static weak var current: AudioController?
+
     // MARK: - 面板状态
     /// 用户意图上的开关(= 期望直通开启;设备暂缺时为 true 且 pendingAutoResume)
     @Published private(set) var isEnabled = false
@@ -169,6 +173,9 @@ final class AudioController: ObservableObject {
     @Published var showDockIcon = false {
         didSet {
             settings.dockIcon = showDockIcon
+            // init 期间 didSet 就会触发,但此时 NSApplication 还没创建(NSApp=nil 会崩);
+            // 启动期的激活策略由 applicationDidFinishLaunching 兜底,这里只响应运行期切换。
+            guard NSApp != nil else { return }
             applyActivationPolicy()
             if showDockIcon {
                 showPanelWindow()  // 立即弹窗给反馈,让用户看到效果
@@ -279,6 +286,7 @@ final class AudioController: ObservableObject {
             }
         }
 
+        AudioController.current = self   // AppDelegate 通过它转发 Dock 点击/激活策略
         refreshPermission()
         refreshLaunchStatus()
         updateBluetoothWarning()
