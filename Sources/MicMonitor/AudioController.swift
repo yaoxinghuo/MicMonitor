@@ -339,7 +339,7 @@ final class AudioController: ObservableObject {
             let host = NSHostingController(rootView: MenuPanelView().environmentObject(self))
             let w = NSWindow(contentViewController: host)
             w.title = "MicMonitor"
-            w.styleMask = [.titled, .closable, .miniaturizable]
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             w.isReleasedWhenClosed = false  // 关窗只隐藏,再次点击不重进托管
             w.center()
             panelWindow = w

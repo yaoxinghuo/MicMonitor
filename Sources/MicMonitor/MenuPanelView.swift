@@ -19,12 +19,14 @@ struct MenuPanelView: View {
                 Text(c.pendingResumeText ?? String(localized: "未在运行"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let err = c.errorMessage {
                 Text(err)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if c.micPermissionDenied {
@@ -44,12 +46,14 @@ struct MenuPanelView: View {
                 Text(String(localized: "检测到啸叫(麦克风拾取了耳机的声音),已自动降低音量至 \(Int(c.feedbackGain * 100))%。建议换用离耳机更远的麦克风(如笔记本内置麦克风),或调低混入音量。"))
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if c.showBluetoothWarning {
                 Text("输入和输出是同一台蓝牙设备:使用它的麦克风会把耳机切换到通话模式(HFP),音乐音质会明显下降。建议选择内置麦克风。")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
@@ -98,11 +102,13 @@ struct MenuPanelView: View {
             Text("实时输入电平(\(c.inputLevel > 0 ? String(format: "%.0f", 20 * log10f(max(c.inputLevel, 1e-4))) : "-∞") dB)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
             Text("启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -113,6 +119,7 @@ struct MenuPanelView: View {
             Text("开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Toggle("开机自启", isOn: Binding(
                 get: { c.launchAtLogin },
@@ -122,15 +129,18 @@ struct MenuPanelView: View {
                 Text("需在 系统设置 → 通用 → 登录项 中允许 MicMonitor")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("缓冲 \(Int(c.bufferedMS)) ms · 欠载 \(c.underrunCount) · 丢弃 \(c.overflowCount) · 重建 \(c.restartCount)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if c.bufferScaleDisplay > 1.01 {
                 Text("检测到设备不稳定,已自动将缓冲放大至 ×\(String(format: "%.1f", c.bufferScaleDisplay))(延迟增加,换取不再卡顿)")
                     .font(.caption2)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
