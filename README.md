@@ -5,6 +5,8 @@ English | [中文](README-zh.md)
 A lightweight macOS menu bar tool that **passes your microphone through to your headphones in real time**, with adjustable mix volume.
 Built for the "wearing noise-isolating headphones and can't hear coworkers calling you" scenario — your music keeps playing through the system as usual; this app only adds the mic signal on top.
 
+<img width="700" height="1144" alt="image" src="https://github.com/user-attachments/assets/27314f65-216c-4550-a05a-6839f5b9f2b5" />
+
 - Lives in the menu bar (optional Dock icon that opens a settings window on click)
 - Independently selectable input (mic) and output (headphone) devices; follows system defaults
 - Mix volume 0%–200% (soft-clipped above 100%, no clipping distortion), one-click mute
