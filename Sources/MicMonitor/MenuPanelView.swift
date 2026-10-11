@@ -132,13 +132,23 @@ struct MenuPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // 等宽字体 + 定宽数字字段,数值位数变化时整行不抖动;面板较窄,一行放两项
-            Text("缓冲 \(String(format: "%4d", Int(c.bufferedMS))) ms · 欠载 \(String(format: "%5d", c.underrunCount))")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Text("丢弃 \(String(format: "%5d", c.overflowCount)) · 重建 \(String(format: "%2d", c.restartCount))")
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
+            // 等宽字体 + Grid 按列对齐(标签/数值各占一列),数值位数变化不抖动,上下行整齐
+            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+                GridRow {
+                    Text("缓冲")
+                    Text(String(format: "%4d ms", Int(c.bufferedMS)))
+                    Text("欠载")
+                    Text(String(format: "%5d", c.underrunCount))
+                }
+                GridRow {
+                    Text("丢弃")
+                    Text(String(format: "%5d", c.overflowCount))
+                    Text("重建")
+                    Text(String(format: "%2d", c.restartCount))
+                }
+            }
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(.secondary)
             if c.bufferScaleDisplay > 1.01 {
                 Text("检测到设备不稳定,已自动将缓冲放大至 ×\(String(format: "%.1f", c.bufferScaleDisplay))(延迟增加,换取不再卡顿)")
                     .font(.caption2)
