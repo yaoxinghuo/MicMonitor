@@ -150,6 +150,8 @@ struct MenuPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            Divider()
+
             // 等宽字体 + Grid 按列对齐(标签/数值各占一列),数值位数变化不抖动,上下行整齐
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 2) {
                 GridRow {
