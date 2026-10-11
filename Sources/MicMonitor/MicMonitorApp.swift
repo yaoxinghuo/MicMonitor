@@ -9,8 +9,8 @@ struct MicMonitorApp: App {
             MenuPanelView()
                 .environmentObject(controller)
         } label: {
-            // 开启时用填充图标区分(LSUIElement 应用只出现在菜单栏)
-            Image(systemName: controller.isRunning ? "waveform.circle.fill" : "ear")
+            // 开启时用填充+声波图标区分(LSUIElement 应用只出现在菜单栏)
+            Image(nsImage: controller.isRunning ? MenuBarIcon.on : MenuBarIcon.off)
         }
         .menuBarExtraStyle(.window)
     }
