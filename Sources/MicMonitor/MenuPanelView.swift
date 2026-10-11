@@ -86,10 +86,8 @@ struct MenuPanelView: View {
 
             Divider()
 
-            HStack(spacing: 6) {
-                Toggle("噪声门", isOn: $c.gateEnabled)
-                helpMark(String(localized: "环境安静但耳机里有持续底噪时开启;电平低于阈值的声音不混入。看电平条把阈值设在「底噪之上、说话声之下」。"))
-            }
+            helpRow("gate", "噪声门", isOn: $c.gateEnabled,
+                    help: "环境安静但耳机里有持续底噪时开启;电平低于阈值的声音不混入。看电平条把阈值设在「底噪之上、说话声之下」。")
             if c.gateEnabled {
                 HStack(spacing: 8) {
                     Text("阈值")
@@ -107,10 +105,8 @@ struct MenuPanelView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 6) {
-                Toggle("人声突显", isOn: $c.voiceFocus)
-                helpMark(String(localized: "检测到语音时正常播放;无人声时按「压低量」衰减,突出说话声、压低环境噪声。可与噪声门叠加。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合下方状态指示调节。"))
-            }
+            helpRow("voice", "人声突显", isOn: $c.voiceFocus,
+                    help: "检测到语音时正常播放;无人声时按「压低量」衰减,突出说话声、压低环境噪声。可与噪声门叠加。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合下方状态指示调节。")
             if c.voiceFocus {
                 HStack(spacing: 8) {
                     Text("灵敏度")
@@ -133,28 +129,20 @@ struct MenuPanelView: View {
                     .foregroundStyle(c.voiceSpeechActiveUI ? .green : .secondary)
             }
 
-            HStack(spacing: 6) {
-                Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
-                helpMark(String(localized: "启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。"))
-            }
+            helpRow("lowlat", "低延迟模式(减少回声感)", isOn: $c.lowLatency,
+                    help: "启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。")
 
             Divider()
 
-            HStack(spacing: 6) {
-                Toggle("在 Dock 中显示图标", isOn: Binding(
-                    get: { c.showDockIcon },
-                    set: { c.setDockIcon($0) }
-                ))
-                helpMark(String(localized: "开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。"))
-            }
+            helpRow("dock", "在 Dock 中显示图标", isOn: Binding(
+                get: { c.showDockIcon },
+                set: { c.setDockIcon($0) }
+            ), help: "开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
 
-            HStack(spacing: 6) {
-                Toggle("开机自启", isOn: Binding(
-                    get: { c.launchAtLogin },
-                    set: { c.setLaunchAtLogin($0) }
-                ))
-                helpMark(String(localized: "登录后自动启动 MicMonitor。若系统提示需要批准,去 系统设置 → 通用 → 登录项 中允许。"))
-            }
+            helpRow("login", "开机自启", isOn: Binding(
+                get: { c.launchAtLogin },
+                set: { c.setLaunchAtLogin($0) }
+            ), help: "登录后自动启动 MicMonitor。若系统提示需要批准,去 系统设置 → 通用 → 登录项 中允许。")
             if c.launchNeedsApproval {
                 Text("需在 系统设置 → 通用 → 登录项 中允许 MicMonitor")
                     .font(.caption2)
@@ -202,32 +190,34 @@ struct MenuPanelView: View {
         .onReceive(meterTimer) { _ in c.refreshMeters() }
     }
 
-    /// 问号帮助图标:原生系统悬停提示(见 HelpIcon)。
-    /// SwiftUI 的 .help() 在菜单栏弹层(非 key window)里不触发——它靠 NSTrackingArea
-    /// 的 .activeInKeyWindow 选项;而 AppKit 的 NSView.toolTip 走独立机制,不要求 key
-    /// window(Dock 图标的提示就是这套,非激活时也能悬停出来),所以直接用 AppKit API。
-    private func helpMark(_ key: String) -> some View {
-        HelpIcon(tip: key)
-            .frame(width: 14, height: 14)
-    }
-}
+    /// 开关 + 可点击的 ? 图标:点击在该行下方展开/收起说明文字(手风琴,同时只展开一条)。
+    /// 不用系统 tooltip:菜单栏弹层非 key window,.help() 不触发;而原生 toolTip 有固定
+    /// ~1s 延迟且无公开 API 可调,点击展开更贴合"主动查看说明"的习惯(系统设置同款)。
+    @State private var expandedHelp: String?
 
-/// 包装 NSView.toolTip:系统原生悬停提示气泡,不依赖 key window,外观/延迟与系统一致。
-private struct HelpIcon: NSViewRepresentable {
-    let tip: String
-
-    func makeNSView(context: Context) -> NSImageView {
-        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-        let image = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
-        let view = NSImageView(image: image ?? NSImage())
-        view.contentTintColor = .secondaryLabelColor
-        view.toolTip = tip
-        return view
-    }
-
-    func updateNSView(_ nsView: NSImageView, context: Context) {
-        nsView.toolTip = tip
+    private func helpRow(_ id: String, _ title: LocalizedStringKey, isOn: Binding<Bool>,
+                         help: LocalizedStringKey) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Toggle(title, isOn: isOn)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        expandedHelp = expandedHelp == id ? nil : id
+                    }
+                } label: {
+                    Image(systemName: expandedHelp == id
+                          ? "questionmark.circle.fill" : "questionmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+            if expandedHelp == id {
+                Text(help)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
