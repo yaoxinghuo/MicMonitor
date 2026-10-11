@@ -1,6 +1,8 @@
 /* MenuPanelView */
 "启用麦克风直通" = "Enable Mic Passthrough";
 "未在运行" = "Not Running";
+"已停止" = "Stopped";
+"运行中" = "Running";
 "没有麦克风权限" = "No Microphone Permission";
 "允许 MicMonitor 访问麦克风后才能工作。" = "MicMonitor needs microphone access to work.";
 "打开系统设置" = "Open System Settings";

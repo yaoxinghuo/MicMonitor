@@ -15,19 +15,19 @@ struct MenuPanelView: View {
             .toggleStyle(.switch)
             .font(.headline)
 
-            if c.isEnabled && !c.isRunning {
-                Text(c.pendingResumeText ?? String(localized: "未在运行"))
+            // 常驻状态行:正常时显示"运行中/已停止",异常时变橙/红;
+            // 固定最小高度,避免提示出现/消失时整个面板布局跳动
+            HStack(alignment: .top, spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 4)
+                Text(statusText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            if let err = c.errorMessage {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
 
             if c.micPermissionDenied {
                 VStack(alignment: .leading, spacing: 4) {
@@ -196,6 +196,20 @@ struct MenuPanelView: View {
     /// 不用系统 tooltip:菜单栏弹层非 key window,.help() 不触发;而原生 toolTip 有固定
     /// ~1s 延迟且无公开 API 可调,点击展开更贴合"主动查看说明"的习惯(系统设置同款)。
     @State private var expandedHelp: String?
+
+    /// 状态行内容:红/橙/绿/灰圆点 + 对应文案。错误优先于等待态,未启用显示"已停止"。
+    private var statusText: String {
+        if let err = c.errorMessage { return err }
+        if !c.isEnabled { return String(localized: "已停止") }
+        if c.isRunning { return String(localized: "运行中") }
+        return c.pendingResumeText ?? String(localized: "未在运行")
+    }
+
+    private var statusColor: Color {
+        if c.errorMessage != nil { return .red }
+        if !c.isEnabled { return .secondary }
+        return c.isRunning ? .green : .orange
+    }
 
     private func helpRow(_ id: String, _ title: LocalizedStringKey, isOn: Binding<Bool>,
                          help: LocalizedStringKey) -> some View {
