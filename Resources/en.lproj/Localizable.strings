@@ -1,0 +1,42 @@
+/* MenuPanelView */
+"启用麦克风直通" = "Enable Mic Passthrough";
+"未在运行" = "Not Running";
+"没有麦克风权限" = "No Microphone Permission";
+"允许 MicMonitor 访问麦克风后才能工作。" = "MicMonitor needs microphone access to work.";
+"打开系统设置" = "Open System Settings";
+"检测到啸叫(麦克风拾取了耳机的声音),已自动降低音量至 %lld%。建议换用离耳机更远的麦克风(如笔记本内置麦克风),或调低混入音量。" = "Feedback detected (the mic is picking up your headphones). Volume auto-lowered to %lld%%. Use a mic farther from the headphones (e.g. the built-in mic), or lower the mix volume.";
+"输入和输出是同一台蓝牙设备:使用它的麦克风会把耳机切换到通话模式(HFP),音乐音质会明显下降。建议选择内置麦克风。" = "Input and output are the same Bluetooth device: using its mic switches it to call mode (HFP) and noticeably degrades music quality. Consider the built-in microphone.";
+"输入设备(麦克风)" = "Input (Microphone)";
+"输出设备(耳机)" = "Output (Headphones)";
+"系统默认(%@)" = "System Default (%@)";
+"(蓝牙)" = "(Bluetooth)";
+"混入音量" = "Mix Volume";
+"取消静音" = "Unmute";
+"静音" = "Mute";
+"噪声门" = "Noise Gate";
+"阈值" = "Threshold";
+"实时输入电平(%@ dB)" = "Live Input Level (%@ dB)";
+"低延迟模式(减少回声感)" = "Low-Latency Mode (reduces echo)";
+"启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。" = "Requests a smaller I/O buffer on the devices. Turn this off if audio stutters or underruns increase.";
+"在 Dock 中显示图标" = "Show Icon in Dock";
+"开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。" = "When on, click the Dock icon to open this panel; the menu bar icon remains.";
+"开机自启" = "Launch at Login";
+"需在 系统设置 → 通用 → 登录项 中允许 MicMonitor" = "Allow MicMonitor under System Settings → General → Login Items";
+"缓冲 %lld ms · 欠载 %lld · 丢弃 %lld · 重建 %lld" = "Buffer %lld ms · Underruns %lld · Dropped %lld · Rebuilds %lld";
+"检测到设备不稳定,已自动将缓冲放大至 ×%@(延迟增加,换取不再卡顿)" = "Unstable device detected — buffer auto-scaled to ×%@ (adds latency, avoids stuttering)";
+"打开日志" = "Open Log";
+"复制诊断信息" = "Copy Diagnostics";
+"退出" = "Quit";
+
+/* AudioController */
+"等待设备重新连接…" = "Waiting for device to reconnect…";
+"启动中…" = "Starting…";
+"未获得麦克风权限,请在系统设置中允许后重试。" = "Microphone permission not granted. Allow it in System Settings and try again.";
+"所选输入设备当前不可用,重新连接后将自动恢复。" = "The selected input device is unavailable; it will resume automatically when reconnected.";
+"所选输出设备当前不可用,重新连接后将自动恢复。" = "The selected output device is unavailable; it will resume automatically when reconnected.";
+"没有可用的输入设备" = "No input device available";
+"没有可用的输出设备" = "No output device available";
+"检测到音频不稳定,已自动切换为标准缓冲模式(可能是设备不支持低延迟小缓冲)。" = "Audio instability detected; automatically switched to standard buffering (the device may not support small low-latency buffers).";
+"检测到音频不稳定,已自动增大缓冲(延迟会略增)。" = "Audio instability detected; buffer automatically increased (latency will be slightly higher).";
+"设备「%@」已拔出,重新连接后将自动恢复。" = "Device \"%@\" was unplugged; it will resume automatically when reconnected.";
+"开机自启设置失败:%@" = "Failed to configure launch at login: %@";

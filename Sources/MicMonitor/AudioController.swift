@@ -170,26 +170,28 @@ final class AudioController: ObservableObject {
     /// Dock 图标模式:开 = regular(显示 Dock 图标,点击弹出面板窗口);
     /// 关 = accessory(纯菜单栏)。LSUIElement 只是启动默认值,运行时可合法切换。
     /// 菜单栏图标两种模式下都保留——它是常驻入口,否则 Dock 模式关窗后无入口可回。
-    @Published var showDockIcon = false {
-        didSet {
-            settings.dockIcon = showDockIcon
-            // init 期间 didSet 就会触发,但此时 NSApplication 还没创建(NSApp=nil 会崩);
-            // 启动期的激活策略由 applicationDidFinishLaunching 兜底,这里只响应运行期切换。
-            guard NSApp != nil else { return }
-            applyActivationPolicy()
-            if showDockIcon {
-                showPanelWindow()  // 立即弹窗给反馈,让用户看到效果
-            } else {
-                panelWindow?.close()  // Dock 入口没了,窗口留着会失去意义
-            }
+    /// 注意:不要在 didSet 里做副作用——init 恢复设置时 didSet 会触发,那时
+    /// NSApp/Scene 尚未就绪(早于启动切激活策略或创建窗口都会崩 AG/SIGTRAP)。
+    /// 用户切换走 setDockIcon;启动恢复由 applicationDidFinishLaunching 兜底。
+    @Published private(set) var showDockIcon = false
+
+    func setDockIcon(_ on: Bool) {
+        guard on != showDockIcon else { return }
+        showDockIcon = on
+        settings.dockIcon = on
+        applyActivationPolicy()
+        if on {
+            showPanelWindow()   // 立即弹窗给反馈,让用户看到效果
+        } else {
+            panelWindow?.close()  // Dock 入口没了,窗口留着会失去意义
         }
     }
 
     /// 面板副标题:期望开启但未在运行时的说明
     var pendingResumeText: String? {
         guard isEnabled, !isRunning else { return nil }
-        if pendingAutoResume { return "等待设备重新连接…" }
-        return errorMessage == nil ? "启动中…" : nil
+        if pendingAutoResume { return String(localized: "等待设备重新连接…") }
+        return errorMessage == nil ? String(localized: "启动中…") : nil
     }
 
     // 电平/状态(UI 定时刷新)
@@ -320,7 +322,12 @@ final class AudioController: ObservableObject {
     /// LSUIElement 只是 bundle 启动默认,运行时用 setActivationPolicy 切换是合法做法。
     /// 需在 NSApplication 初始化完成后调用,所以 MicMonitorApp 在 onAppear 里触发。
     func applyActivationPolicy() {
-        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+        // 启动早期立刻切换激活策略会让 MenuBarExtra 的宿主视图撞上
+        // AttributeGraph precondition_failure(SIGABRT)——延后到 runloop 稳定后再切。
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            NSApp.setActivationPolicy(self.showDockIcon ? .regular : .accessory)
+        }
     }
 
     /// Dock 模式下点图标(applicationShouldHandleReopen)或开关切换时调用:
@@ -357,10 +364,10 @@ final class AudioController: ObservableObject {
             if granted {
                 startPipeline()
             } else {
-                errorMessage = "未获得麦克风权限,请在系统设置中允许后重试。"
+                errorMessage = String(localized: "未获得麦克风权限,请在系统设置中允许后重试。")
             }
         case .denied, .restricted:
-            errorMessage = "未获得麦克风权限,请在系统设置中允许后重试。"
+            errorMessage = String(localized: "未获得麦克风权限,请在系统设置中允许后重试。")
         @unknown default:
             break
         }
@@ -392,12 +399,12 @@ final class AudioController: ObservableObject {
 
         // 校验选定设备是否在线
         if !settings.inputUID.isEmpty && devices.info(forUID: settings.inputUID) == nil {
-            errorMessage = "所选输入设备当前不可用,重新连接后将自动恢复。"
+            errorMessage = String(localized: "所选输入设备当前不可用,重新连接后将自动恢复。")
             pendingAutoResume = true
             return
         }
         if !settings.outputUID.isEmpty && devices.info(forUID: settings.outputUID) == nil {
-            errorMessage = "所选输出设备当前不可用,重新连接后将自动恢复。"
+            errorMessage = String(localized: "所选输出设备当前不可用,重新连接后将自动恢复。")
             pendingAutoResume = true
             return
         }
@@ -405,11 +412,11 @@ final class AudioController: ObservableObject {
         let inDev = resolvedInput()
         let outDev = resolvedOutput()
         guard inDev != nil || CoreAudioUtil.defaultDeviceID(input: true) != 0 else {
-            errorMessage = "没有可用的输入设备"
+            errorMessage = String(localized: "没有可用的输入设备")
             return
         }
         guard outDev != nil || CoreAudioUtil.defaultDeviceID(input: false) != 0 else {
-            errorMessage = "没有可用的输出设备"
+            errorMessage = String(localized: "没有可用的输出设备")
             return
         }
 
@@ -551,7 +558,7 @@ final class AudioController: ObservableObject {
             guard events > 200 else { return }
             self.log.log("低延迟模式 2s 内欠载 \(events) 次,判定设备跟不上小缓冲,自动回退标准缓冲")
             self.lowLatencyFallbackDone = true
-            self.errorMessage = "检测到音频不稳定,已自动切换为标准缓冲模式(可能是设备不支持低延迟小缓冲)。"
+            self.errorMessage = String(localized: "检测到音频不稳定,已自动切换为标准缓冲模式(可能是设备不支持低延迟小缓冲)。")
             self.lowLatency = false
         }
     }
@@ -581,7 +588,7 @@ final class AudioController: ObservableObject {
                 }
                 self.bufferScale = min(self.maxBufferScale, self.bufferScale * 1.8)
                 self.log.log("3s 内欠载+溢出 \(delta) 次,自动放大缓冲至 ×\(String(format: "%.1f", self.bufferScale)) 并重建")
-                self.errorMessage = "检测到音频不稳定,已自动增大缓冲(延迟会略增)。"
+                self.errorMessage = String(localized: "检测到音频不稳定,已自动增大缓冲(延迟会略增)。")
                 self.scheduleRebuild("自适应缓冲放大")
                 return   // 新管线启动后会重新调度一次健康检查
             }
@@ -967,7 +974,7 @@ final class AudioController: ObservableObject {
             let missing = missingSelectedDevice()
             if isRunning, let missing {
                 log.log("设备已拔出(\(missing)),暂停直通等待重连")
-                errorMessage = "设备「\(missing)」已拔出,重新连接后将自动恢复。"
+                errorMessage = String(localized: "设备「\(missing)」已拔出,重新连接后将自动恢复。")
                 pendingAutoResume = true
                 stopPipeline()
             } else if pendingAutoResume, missing == nil, isEnabled {
@@ -1053,7 +1060,7 @@ final class AudioController: ObservableObject {
                 }
             }
         } catch {
-            errorMessage = "开机自启设置失败:\(error.localizedDescription)"
+            errorMessage = String(localized: "开机自启设置失败:\(error.localizedDescription)")
             log.log("SMAppService 失败:\(error.localizedDescription)")
         }
         Task { @MainActor [weak self] in

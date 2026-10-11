@@ -48,6 +48,12 @@ sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD_NUMBER/g" \
     Resources/Info.plist > "$APP.app/Contents/Info.plist"
 printf 'APPL????' > "$APP.app/Contents/PkgInfo"
 
+# 本地化资源:Resources/xx.lproj 原样拷入 Contents/Resources(macOS 按系统语言自动选取)
+for lproj in Resources/*.lproj; do
+    [[ -d "$lproj" ]] || continue
+    cp -R "$lproj" "$APP.app/Contents/Resources/"
+done
+
 # 从单张 1024x1024 PNG 生成 iconset 并编译成 icns(sips/iconutil 均为系统自带,无需 Xcode)
 if [[ -f Resources/AppIcon.png ]]; then
     echo "==> 生成 AppIcon.icns"

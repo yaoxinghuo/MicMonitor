@@ -10,7 +10,6 @@ struct MicMonitorApp: App {
         MenuBarExtra {
             MenuPanelView()
                 .environmentObject(controller)
-                .onAppear { controller.applyActivationPolicy() }
         } label: {
             // 开启时用填充图标区分(LSUIElement 应用只出现在菜单栏)
             Image(nsImage: controller.isRunning ? MenuBarIcon.on : MenuBarIcon.off)

@@ -16,7 +16,7 @@ struct MenuPanelView: View {
             .font(.headline)
 
             if c.isEnabled && !c.isRunning {
-                Text(c.pendingResumeText ?? "未在运行")
+                Text(c.pendingResumeText ?? String(localized: "未在运行"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -41,8 +41,7 @@ struct MenuPanelView: View {
             }
 
             if c.feedbackGain < 0.9 {
-                Text("检测到啸叫(麦克风拾取了耳机的声音),已自动降低音量至 \(Int(c.feedbackGain * 100))%。"
-                    + "建议换用离耳机更远的麦克风(如笔记本内置麦克风),或调低混入音量。")
+                Text(String(localized: "检测到啸叫(麦克风拾取了耳机的声音),已自动降低音量至 \(Int(c.feedbackGain * 100))%。建议换用离耳机更远的麦克风(如笔记本内置麦克风),或调低混入音量。"))
                     .font(.caption)
                     .foregroundStyle(.red)
             }
@@ -58,14 +57,14 @@ struct MenuPanelView: View {
             Picker("输入设备(麦克风)", selection: $c.selectedInputUID) {
                 Text("系统默认(\(c.defaultInputName))").tag("")
                 ForEach(c.inputDevices) { d in
-                    Text(d.name + (d.isBluetooth ? "(蓝牙)" : "")).tag(d.uid)
+                    Text(d.name + (d.isBluetooth ? String(localized: "(蓝牙)") : "")).tag(d.uid)
                 }
             }
 
             Picker("输出设备(耳机)", selection: $c.selectedOutputUID) {
                 Text("系统默认(\(c.defaultOutputName))").tag("")
                 ForEach(c.outputDevices) { d in
-                    Text(d.name + (d.isBluetooth ? "(蓝牙)" : "")).tag(d.uid)
+                    Text(d.name + (d.isBluetooth ? String(localized: "(蓝牙)") : "")).tag(d.uid)
                 }
             }
 
@@ -77,7 +76,7 @@ struct MenuPanelView: View {
                 Text("\(Int(round(c.volume * 100)))%")
                     .monospacedDigit()
                     .frame(width: 44, alignment: .trailing)
-                Button(c.muted ? "取消静音" : "静音") { c.muted.toggle() }
+                Button(c.muted ? String(localized: "取消静音") : String(localized: "静音")) { c.muted.toggle() }
                     .controlSize(.small)
             }
 
@@ -107,7 +106,10 @@ struct MenuPanelView: View {
 
             Divider()
 
-            Toggle("在 Dock 中显示图标", isOn: $c.showDockIcon)
+            Toggle("在 Dock 中显示图标", isOn: Binding(
+                get: { c.showDockIcon },
+                set: { c.setDockIcon($0) }
+            ))
             Text("开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
