@@ -17,7 +17,8 @@
 "阈值" = "Threshold";
 "实时输入电平(%@ dB)" = "Live Input Level (%@ dB)";
 "人声突显" = "Voice Focus";
-"检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合上方状态指示调节。" = "Plays normally while speech is detected; ducks non-speech sounds by ~22dB to emphasize voices over ambient noise. Stacks with the noise gate. Too low a sensitivity may also duck real speech; too high defeats the filter — tune with the live indicator above.";
+"检测到语音时正常播放;无人声时按「压低量」衰减,突出说话声、压低环境噪声。可与噪声门叠加使用。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合上方状态指示调节。" = "Plays normally while speech is detected; attenuates non-speech sounds by the Ducking amount to emphasize voices over ambient noise. Stacks with the noise gate. Too low a sensitivity may also duck real speech; too high defeats the filter — tune with the live indicator above.";
+"压低量" = "Ducking";
 "灵敏度" = "Sensitivity";
 "当前状态:检测到语音" = "Status: speech detected";
 "当前状态:非人声(已压低)" = "Status: non-speech (ducked)";

@@ -20,6 +20,7 @@ final class MeterState: @unchecked Sendable {
     let feedbackGainBits = Atomic<UInt32>(Float(1).bitPattern)  // 啸叫守护当前增益(<1 表示正在压制)
     let voiceFocusEnabled = Atomic<Int>(0)                    // 人声突显开关(UI → 实时线程)
     let voiceFocusThreshBits = Atomic<UInt32>(Float(0.28).bitPattern) // 语音置信度阈值(灵敏度滑杆映射)
+    let voiceDuckBits = Atomic<UInt32>(Float(0.08).bitPattern)        // 非人声压低目标增益(≈-22dB)
     let voiceSpeechActive = Atomic<Int>(0)                    // 分类器当前判定(分类器 → 实时线程)
     let bufferedFrames = Atomic<Int>(0)                       // 播放端环形缓冲水位
     let convertErrors = Atomic<Int>(0)
@@ -178,10 +179,17 @@ final class AudioController: ObservableObject {
     @Published var voiceFocusSensitivity: Float = 0.6 {
         didSet { pushVoiceThreshold(); settings.voiceFocusSensitivity = voiceFocusSensitivity }
     }
+    /// 非人声的压低量(dB,负值):0dB = 不压(等效关闭效果),-40dB 几乎静音
+    @Published var voiceDuckDB: Float = -22 {
+        didSet { pushVoiceDuck(); settings.voiceDuckDB = voiceDuckDB }
+    }
     private func pushVoiceThreshold() {
         let s = min(max(voiceFocusSensitivity, 0), 1)
         let threshold = max(0.02, 0.7 * (1 - s))
         meter.voiceFocusThreshBits.store(threshold.bitPattern, ordering: .relaxed)
+    }
+    private func pushVoiceDuck() {
+        meter.voiceDuckBits.store(powf(10, min(voiceDuckDB, 0) / 20).bitPattern, ordering: .relaxed)
     }
     /// 分类器实时判定(UI 指示用)
     @Published private(set) var voiceSpeechActiveUI = false
@@ -297,6 +305,7 @@ final class AudioController: ObservableObject {
         gateThresholdDB = settings.gateThresholdDB
         voiceFocus = settings.voiceFocus
         voiceFocusSensitivity = settings.voiceFocusSensitivity
+        voiceDuckDB = settings.voiceDuckDB
         lowLatency = settings.lowLatency
         showDockIcon = settings.dockIcon
         pushGain()
@@ -304,6 +313,7 @@ final class AudioController: ObservableObject {
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
         meter.voiceFocusEnabled.store(voiceFocus ? 1 : 0, ordering: .relaxed)
         pushVoiceThreshold()
+        pushVoiceDuck()
 
         // 首次启动优先选内置麦克风:蓝牙耳机的麦克风会把耳机切到通话模式(HFP),
         // 导致音乐音质明显下降(蓝牙协议限制,无法绕过)
@@ -867,6 +877,7 @@ final class AudioController: ObservableObject {
                            sampleRate: ctx.sampleRate)
         ctx.dsp.updateVoiceFocus(enabled: shared.voiceFocusEnabled.load(ordering: .relaxed) != 0,
                                  active: shared.voiceSpeechActive.load(ordering: .relaxed) != 0,
+                                 duckGain: Float(bitPattern: shared.voiceDuckBits.load(ordering: .relaxed)),
                                  sampleRate: ctx.sampleRate)
 
         let list = UnsafeMutableAudioBufferListPointer(abl)

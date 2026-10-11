@@ -27,10 +27,10 @@ final class DSPEngine: @unchecked Sendable {
     // 有语音 → 增益回到 1(快攻 ~150ms,保证话头不被切),无语音 → 压到 voiceDuck(慢释 ~600ms 平滑)
     var voiceFocusEnabled = false
     var voiceSpeechActive = false
+    var voiceDuck: Float = 0.08              // 非人声目标增益(用户可调,默认 ≈ -22dB)
     private(set) var voiceGain: Float = 1
     private var voiceAttackCoeff: Float = 0
     private var voiceReleaseCoeff: Float = 0
-    private let voiceDuck: Float = 0.08      // 非人声目标增益 ≈ -22dB
 
     // ---- 电平(只读,供 UI 电平表)----
     private(set) var inputPeak: Float = 0
@@ -86,10 +86,11 @@ final class DSPEngine: @unchecked Sendable {
     }
 
     /// 更新人声突显参数。active 为分类器当前帧判定;平滑系数每块重算代价极低。
-    func updateVoiceFocus(enabled: Bool, active: Bool, sampleRate: Double,
+    func updateVoiceFocus(enabled: Bool, active: Bool, duckGain: Float, sampleRate: Double,
                           attackSec: Float = 0.150, releaseSec: Float = 0.600) {
         voiceFocusEnabled = enabled
         voiceSpeechActive = active
+        voiceDuck = min(max(duckGain, 0), 1)
         let sr = Float(max(sampleRate, 1))
         voiceAttackCoeff = 1 - expf(-1 / (attackSec * sr))
         voiceReleaseCoeff = 1 - expf(-1 / (releaseSec * sr))
