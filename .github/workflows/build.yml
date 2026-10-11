@@ -1,6 +1,7 @@
 name: build
 
 on:
+  # 普通提交 / PR:只跑单元测试,不构建产物
   push:
     branches: [main]
     tags: ['v*']
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # 打 v* 标签时需要创建 Release
+  contents: write   # tag 触发时需要创建 Release
 
 jobs:
   build:
@@ -24,10 +25,13 @@ jobs:
       - name: Unit tests (also compiles the executable target)
         run: swift test
 
+      # 以下为发布链路:仅 tag(v*)或手动触发时才构建 .app/.zip
       - name: Assemble MicMonitor.app + zip
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: bash scripts/build_app.sh
 
-      - name: Upload MicMonitor.zip
+      - name: Upload MicMonitor.zip artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: MicMonitor-${{ github.ref_name }}
@@ -35,9 +39,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Release on version tag
+      - name: Create GitHub Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: MicMonitor ${{ github.ref_name }}
           files: MicMonitor.zip
           generate_release_notes: true
