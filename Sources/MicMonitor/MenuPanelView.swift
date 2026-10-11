@@ -133,10 +133,10 @@ struct MenuPanelView: View {
             }
 
             // 等宽字体 + Grid 按列对齐(标签/数值各占一列),数值位数变化不抖动,上下行整齐
-            Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 2) {
                 GridRow {
                     Text("缓冲")
-                    Text(String(format: "%-4d ms", Int(c.bufferedMS)))
+                    Text(String(format: "%-4d", Int(c.bufferedMS)) + "ms")
                     Text("欠载")
                     Text(String(format: "%-5d", c.underrunCount))
                 }
