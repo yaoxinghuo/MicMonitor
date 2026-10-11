@@ -105,7 +105,21 @@ struct MenuPanelView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Toggle("人声突显", isOn: $c.voiceFocus)
-            Text("检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。")
+            if c.voiceFocus {
+                HStack(spacing: 8) {
+                    Text("灵敏度")
+                    Slider(value: $c.voiceFocusSensitivity, in: 0...1, step: 0.05)
+                    Text("\(Int(round(c.voiceFocusSensitivity * 100)))%")
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                }
+                Text(c.voiceSpeechActiveUI
+                     ? String(localized: "当前状态:检测到语音")
+                     : String(localized: "当前状态:非人声(已压低)"))
+                    .font(.caption2)
+                    .foregroundStyle(c.voiceSpeechActiveUI ? .green : .secondary)
+            }
+            Text("检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合上方状态指示调节。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

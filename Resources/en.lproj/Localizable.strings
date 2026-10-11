@@ -17,7 +17,10 @@
 "阈值" = "Threshold";
 "实时输入电平(%@ dB)" = "Live Input Level (%@ dB)";
 "人声突显" = "Voice Focus";
-"检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。" = "Plays normally while speech is detected; ducks non-speech sounds by ~22dB to emphasize voices over ambient noise. Can be combined with the noise gate.";
+"检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合上方状态指示调节。" = "Plays normally while speech is detected; ducks non-speech sounds by ~22dB to emphasize voices over ambient noise. Stacks with the noise gate. Too low a sensitivity may also duck real speech; too high defeats the filter — tune with the live indicator above.";
+"灵敏度" = "Sensitivity";
+"当前状态:检测到语音" = "Status: speech detected";
+"当前状态:非人声(已压低)" = "Status: non-speech (ducked)";
 "低延迟模式(减少回声感)" = "Low-Latency Mode (reduces echo)";
 "启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。" = "Requests a smaller I/O buffer on the devices. Turn this off if audio stutters or underruns increase.";
 "在 Dock 中显示图标" = "Show Icon in Dock";

@@ -19,6 +19,7 @@ final class MeterState: @unchecked Sendable {
     let gateGainBits = Atomic<UInt32>(Float(1).bitPattern)      // 噪声门开合度
     let feedbackGainBits = Atomic<UInt32>(Float(1).bitPattern)  // 啸叫守护当前增益(<1 表示正在压制)
     let voiceFocusEnabled = Atomic<Int>(0)                    // 人声突显开关(UI → 实时线程)
+    let voiceFocusThreshBits = Atomic<UInt32>(Float(0.28).bitPattern) // 语音置信度阈值(灵敏度滑杆映射)
     let voiceSpeechActive = Atomic<Int>(0)                    // 分类器当前判定(分类器 → 实时线程)
     let bufferedFrames = Atomic<Int>(0)                       // 播放端环形缓冲水位
     let convertErrors = Atomic<Int>(0)
@@ -172,6 +173,18 @@ final class AudioController: ObservableObject {
             settings.voiceFocus = voiceFocus
         }
     }
+    /// 人声突显灵敏度 0~1:越高分类阈值越低(更多声音被当成人声放行);
+    /// 映射到分类器置信度阈值,阈值下限 0.02 防止拉到 100% 时完全不过滤
+    @Published var voiceFocusSensitivity: Float = 0.6 {
+        didSet { pushVoiceThreshold(); settings.voiceFocusSensitivity = voiceFocusSensitivity }
+    }
+    private func pushVoiceThreshold() {
+        let s = min(max(voiceFocusSensitivity, 0), 1)
+        let threshold = max(0.02, 0.7 * (1 - s))
+        meter.voiceFocusThreshBits.store(threshold.bitPattern, ordering: .relaxed)
+    }
+    /// 分类器实时判定(UI 指示用)
+    @Published private(set) var voiceSpeechActiveUI = false
     /// 低延迟模式:请求 256 帧 IO 缓冲并把水位压到 ~5 块,端到端延迟 ~27ms;
     /// 关掉则回到系统默认缓冲。若设备跟不上小缓冲,启动自检会自动关闭此项并提示。
     @Published var lowLatency = true {
@@ -283,12 +296,14 @@ final class AudioController: ObservableObject {
         gateEnabled = settings.gateEnabled
         gateThresholdDB = settings.gateThresholdDB
         voiceFocus = settings.voiceFocus
+        voiceFocusSensitivity = settings.voiceFocusSensitivity
         lowLatency = settings.lowLatency
         showDockIcon = settings.dockIcon
         pushGain()
         pushThreshold()
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
         meter.voiceFocusEnabled.store(voiceFocus ? 1 : 0, ordering: .relaxed)
+        pushVoiceThreshold()
 
         // 首次启动优先选内置麦克风:蓝牙耳机的麦克风会把耳机切到通话模式(HFP),
         // 导致音乐音质明显下降(蓝牙协议限制,无法绕过)
@@ -757,7 +772,7 @@ final class AudioController: ObservableObject {
         if shared.voiceFocusEnabled.load(ordering: .relaxed) != 0 {
             if ctx.voiceAnalyzer == nil || ctx.voiceAnalyzerRate != fmt.sampleRate
                 || ctx.voiceAnalyzerCh != fmt.channelCount {
-                ctx.voiceAnalyzer = try? VoiceFocusAnalyzer(format: fmt)
+                ctx.voiceAnalyzer = try? VoiceFocusAnalyzer(format: fmt, shared: shared)
                 ctx.voiceAnalyzerRate = fmt.sampleRate
                 ctx.voiceAnalyzerCh = fmt.channelCount
             }
@@ -1063,6 +1078,7 @@ final class AudioController: ObservableObject {
         inputLevel = max(peak, inputLevel * 0.8)  // UI 侧峰值保持衰减
         gateGain = Float(bitPattern: meter.gateGainBits.load(ordering: .relaxed))
         feedbackGain = Float(bitPattern: meter.feedbackGainBits.load(ordering: .relaxed))
+        voiceSpeechActiveUI = meter.voiceSpeechActive.load(ordering: .relaxed) != 0
         bufferedMS = Double(meter.bufferedFrames.load(ordering: .relaxed)) / sampleRate * 1000
         if let ring {
             underrunCount = accUnderrun + ring.underrunEvents.load(ordering: .relaxed)

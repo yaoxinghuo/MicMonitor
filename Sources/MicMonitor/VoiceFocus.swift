@@ -9,21 +9,17 @@ import Synchronization
 /// 结果(若有)在同一调用线程同步分发给观察者,我们只做 O(类别数) 的字符串比较 + 原子写。
 final class VoiceFocusAnalyzer: NSObject, SNResultsObserving, @unchecked Sendable {
 
-    /// 分类器"当前有语音"标志:1 = 最近检测到语音(含保持窗),0 = 非人声。
-    /// 写端:观察者回调(tap 同线程);读端:渲染线程。跨线程只经此原子量,无锁。
-    let speechActive = Atomic<Int>(0)
-
     private let analyzer: SNAudioStreamAnalyzer
     private var framePos: AVAudioFramePosition = 0
     /// 最近一次判定为语音的时刻;结果间隔 ~0.75s(1.5s 窗 × 0.5 overlap),
     /// 加 1.2s 保持窗吸收句中停顿,避免逐词抖动
     private var lastSpeechAt = Date.distantPast
     private let speechHoldSec: TimeInterval = 1.2
-    /// 语音类置信度合计超过此阈值判定"有人声"。version1 分类器对语音的置信度
-    /// 通常不会接近 1(是多标签概率分布),阈值取偏低值保证召回
-    private let speechThreshold = 0.25
+    /// 共享状态引用:灵敏度阈值在其原子量里,UI 滑杆改动实时生效
+    private let shared: MeterState
 
-    init(format: AVAudioFormat) throws {
+    init(format: AVAudioFormat, shared: MeterState) throws {
+        self.shared = shared
         analyzer = SNAudioStreamAnalyzer(format: format)
         let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
         request.overlapFactor = 0.5
@@ -63,13 +59,14 @@ final class VoiceFocusAnalyzer: NSObject, SNResultsObserving, @unchecked Sendabl
             speech += c.confidence
         }
         let now = Date()
-        if speech >= speechThreshold { lastSpeechAt = now }
-        speechActive.store(now.timeIntervalSince(lastSpeechAt) < speechHoldSec ? 1 : 0,
-                           ordering: .relaxed)
+        let threshold = Double(Float(bitPattern: shared.voiceFocusThreshBits.load(ordering: .relaxed)))
+        if speech >= threshold { lastSpeechAt = now }
+        shared.voiceSpeechActive.store(
+            now.timeIntervalSince(lastSpeechAt) < speechHoldSec ? 1 : 0, ordering: .relaxed)
     }
 
     func request(_ request: SNRequest, didFailWithError error: Error) {
         // 分类器出错时保守起见放行全部声音(等效关闭),而不是把人声也压掉
-        speechActive.store(1, ordering: .relaxed)
+        shared.voiceSpeechActive.store(1, ordering: .relaxed)
     }
 }
