@@ -5,6 +5,8 @@ struct MenuPanelView: View {
     @EnvironmentObject private var c: AudioController
     // 电平表刷新约 15fps,只读原子量,不占音频线程
     private let meterTimer = Timer.publish(every: 1.0 / 15, on: .main, in: .common).autoconnect()
+    /// 悬停 ? 图标时显示的说明(菜单栏弹层里系统 tooltip 不工作,改为面板内固定区域)
+    @State private var hoverHelp: LocalizedStringKey = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -188,6 +190,15 @@ struct MenuPanelView: View {
 
             Divider()
 
+            // 悬停 ? 图标的说明文字显示区(固定高度,无内容时占位防抖动)
+            Text(hoverHelp)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 26, alignment: .topLeading)
+
+            Divider()
+
             HStack {
                 Button("打开日志") { c.openLogs() }
                 Button("复制诊断信息") { c.copyDiagnostics() }
@@ -202,11 +213,12 @@ struct MenuPanelView: View {
         .onReceive(meterTimer) { _ in c.refreshMeters() }
     }
 
-    /// 问号帮助图标:悬停显示 .help 系统原生 tooltip,说明文字不占版面
+    /// 问号帮助图标:悬停把说明文字显示在面板底部固定区域(见下方 hoverHelp Text);
+    /// 不用 .help/.popover——菜单栏弹层非 key window,系统 tooltip 不触发,弹子窗还可能顶掉面板
     private func helpMark(_ key: LocalizedStringKey) -> some View {
         Image(systemName: "questionmark.circle")
             .foregroundStyle(.secondary)
-            .help(key)
+            .onHover { hovering in hoverHelp = hovering ? key : "" }
     }
 }
 
