@@ -132,9 +132,9 @@ struct MenuPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // 定宽数字字段 + 等宽数字,避免数值位数变化时整行抖动
+            // 整行等宽字体:空格与数字同宽,定宽补齐才真正不抖动
             Text("缓冲 \(String(format: "%4d", Int(c.bufferedMS))) ms · 欠载 \(String(format: "%5d", c.underrunCount)) · 丢弃 \(String(format: "%5d", c.overflowCount)) · 重建 \(String(format: "%2d", c.restartCount))")
-                .font(.caption2.monospacedDigit())
+                .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if c.bufferScaleDisplay > 1.01 {
