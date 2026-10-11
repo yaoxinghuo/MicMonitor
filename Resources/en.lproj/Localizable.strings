@@ -22,7 +22,7 @@
 "开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。" = "When on, click the Dock icon to open this panel; the menu bar icon remains.";
 "开机自启" = "Launch at Login";
 "需在 系统设置 → 通用 → 登录项 中允许 MicMonitor" = "Allow MicMonitor under System Settings → General → Login Items";
-"缓冲 %lld ms · 欠载 %lld · 丢弃 %lld · 重建 %lld" = "Buffer %lld ms · Underruns %lld · Dropped %lld · Rebuilds %lld";
+"缓冲 %@ ms · 欠载 %@ · 丢弃 %@ · 重建 %@" = "Buffer %@ ms · Underruns %@ · Dropped %@ · Rebuilds %@";
 "检测到设备不稳定,已自动将缓冲放大至 ×%@(延迟增加,换取不再卡顿)" = "Unstable device detected — buffer auto-scaled to ×%@ (adds latency, avoids stuttering)";
 "打开日志" = "Open Log";
 "复制诊断信息" = "Copy Diagnostics";
