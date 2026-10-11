@@ -136,15 +136,15 @@ struct MenuPanelView: View {
             Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 2) {
                 GridRow {
                     Text("缓冲")
-                    Text(String(format: "%4d ms", Int(c.bufferedMS)))
+                    Text(String(format: "%-4d ms", Int(c.bufferedMS)))
                     Text("欠载")
-                    Text(String(format: "%5d", c.underrunCount))
+                    Text(String(format: "%-5d", c.underrunCount))
                 }
                 GridRow {
                     Text("丢弃")
-                    Text(String(format: "%5d", c.overflowCount))
+                    Text(String(format: "%-5d", c.overflowCount))
                     Text("重建")
-                    Text(String(format: "%2d", c.restartCount))
+                    Text(String(format: "%-2d", c.restartCount))
                 }
             }
             .font(.system(.caption2, design: .monospaced))
