@@ -341,7 +341,9 @@ final class AudioController: ObservableObject {
             w.title = "MicMonitor"
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             w.isReleasedWhenClosed = false  // 关窗只隐藏,再次点击不重进托管
-            w.center()
+            // 位置/大小持久化到 defaults,重启后恢复上次窗口位置;无记录则居中
+            w.setFrameAutosaveName("MicMonitorPanel")
+            if !w.setFrameUsingName("MicMonitorPanel") { w.center() }
             panelWindow = w
             w.makeKeyAndOrderFront(nil)
         }
