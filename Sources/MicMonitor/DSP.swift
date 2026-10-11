@@ -21,6 +21,17 @@ final class DSPEngine: @unchecked Sendable {
     private var envDecayCoeff: Float = 0
     private var envelope: Float = 0        // 峰值包络(瞬时上升、缓慢衰减)
 
+    // ---- 人声突显(VAD ducking) ----
+    // 与噪声门互补:噪声门按"电平高低"开关,人声突显按"是否语音"衰减。
+    // active 由 VoiceFocusAnalyzer(SoundAnalysis 分类器)异步写入;
+    // 有语音 → 增益回到 1(快攻 ~150ms,保证话头不被切),无语音 → 压到 voiceDuck(慢释 ~600ms 平滑)
+    var voiceFocusEnabled = false
+    var voiceSpeechActive = false
+    private(set) var voiceGain: Float = 1
+    private var voiceAttackCoeff: Float = 0
+    private var voiceReleaseCoeff: Float = 0
+    private let voiceDuck: Float = 0.08      // 非人声目标增益 ≈ -22dB
+
     // ---- 电平(只读,供 UI 电平表)----
     private(set) var inputPeak: Float = 0
     private(set) var outputPeak: Float = 0
@@ -74,6 +85,16 @@ final class DSPEngine: @unchecked Sendable {
         envDecayCoeff = expf(-1 / (envDecaySec * sr))
     }
 
+    /// 更新人声突显参数。active 为分类器当前帧判定;平滑系数每块重算代价极低。
+    func updateVoiceFocus(enabled: Bool, active: Bool, sampleRate: Double,
+                          attackSec: Float = 0.150, releaseSec: Float = 0.600) {
+        voiceFocusEnabled = enabled
+        voiceSpeechActive = active
+        let sr = Float(max(sampleRate, 1))
+        voiceAttackCoeff = 1 - expf(-1 / (attackSec * sr))
+        voiceReleaseCoeff = 1 - expf(-1 / (releaseSec * sr))
+    }
+
     /// 就地处理一块 planar 音频(dsts[c] 为第 c 声道的缓冲)。返回本块输入峰值。
     /// 两遍处理:先逐帧算出总增益(音量斜坡 × 门开合度),再逐声道施加并限幅。
     @discardableResult
@@ -101,12 +122,16 @@ final class DSPEngine: @unchecked Sendable {
                 let coeff = target > gateGain ? gateAttackCoeff : gateReleaseCoeff
                 gateGain += (target - gateGain) * coeff
 
+                let vTarget: Float = (!voiceFocusEnabled || voiceSpeechActive) ? 1 : voiceDuck
+                let vcoeff = vTarget > voiceGain ? voiceAttackCoeff : voiceReleaseCoeff
+                voiceGain += (vTarget - voiceGain) * vcoeff
+
                 if rampRemaining > 0 {
                     volumeCurrent += rampStep
                     rampRemaining -= 1
                     if rampRemaining == 0 { volumeCurrent = volumeTarget }
                 }
-                gainScratch[i] = volumeCurrent * gateGain * feedbackGain
+                gainScratch[i] = volumeCurrent * gateGain * feedbackGain * voiceGain
             }
             // 第二遍:逐声道应用增益 + 软限幅
             for c in 0..<channels {
@@ -139,6 +164,7 @@ final class DSPEngine: @unchecked Sendable {
         rampRemaining = 0
         gateGain = 1
         envelope = 0
+        voiceGain = 1
         inputPeak = 0
         outputPeak = 0
         feedbackGain = 1

@@ -104,6 +104,12 @@ struct MenuPanelView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            Toggle("人声突显", isOn: $c.voiceFocus)
+            Text("检测到语音时正常播放;无人声时自动压低约 22dB,突出说话声、压低环境噪声。可与噪声门叠加使用。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
             Text("启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。")
                 .font(.caption2)

@@ -18,6 +18,8 @@ final class MeterState: @unchecked Sendable {
     let inputPeakBits = Atomic<UInt32>(Float(0).bitPattern)     // 采集端输入峰值
     let gateGainBits = Atomic<UInt32>(Float(1).bitPattern)      // 噪声门开合度
     let feedbackGainBits = Atomic<UInt32>(Float(1).bitPattern)  // 啸叫守护当前增益(<1 表示正在压制)
+    let voiceFocusEnabled = Atomic<Int>(0)                    // 人声突显开关(UI → 实时线程)
+    let voiceSpeechActive = Atomic<Int>(0)                    // 分类器当前判定(分类器 → 实时线程)
     let bufferedFrames = Atomic<Int>(0)                       // 播放端环形缓冲水位
     let convertErrors = Atomic<Int>(0)
 }
@@ -40,6 +42,10 @@ final class CaptureContext: @unchecked Sendable {
     var inSampleRate: Double = 0
     var inChannels: UInt32 = 0
     var outBuffer: AVAudioPCMBuffer?
+    /// 人声突显分类器(按输入格式懒建;开关关闭时释放)。仅 tap 线程访问。
+    var voiceAnalyzer: VoiceFocusAnalyzer?
+    var voiceAnalyzerRate: Double = 0
+    var voiceAnalyzerCh: UInt32 = 0
 
     init(ring: RingBuffer, shared: MeterState, canonicalFormat: AVAudioFormat,
          channelCount: Int, prefillFrames: Int) {
@@ -158,6 +164,14 @@ final class AudioController: ObservableObject {
     @Published var gateThresholdDB: Float = -50 {
         didSet { pushThreshold(); settings.gateThresholdDB = gateThresholdDB }
     }
+    /// 人声突显:SoundAnalysis 分类器检测到语音才放行,非人声压到约 -22dB。
+    /// 只改原子量/投喂路径,热切换不需要重建引擎。
+    @Published var voiceFocus = false {
+        didSet {
+            meter.voiceFocusEnabled.store(voiceFocus ? 1 : 0, ordering: .relaxed)
+            settings.voiceFocus = voiceFocus
+        }
+    }
     /// 低延迟模式:请求 256 帧 IO 缓冲并把水位压到 ~5 块,端到端延迟 ~27ms;
     /// 关掉则回到系统默认缓冲。若设备跟不上小缓冲,启动自检会自动关闭此项并提示。
     @Published var lowLatency = true {
@@ -268,11 +282,13 @@ final class AudioController: ObservableObject {
         muted = settings.muted
         gateEnabled = settings.gateEnabled
         gateThresholdDB = settings.gateThresholdDB
+        voiceFocus = settings.voiceFocus
         lowLatency = settings.lowLatency
         showDockIcon = settings.dockIcon
         pushGain()
         pushThreshold()
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
+        meter.voiceFocusEnabled.store(voiceFocus ? 1 : 0, ordering: .relaxed)
 
         // 首次启动优先选内置麦克风:蓝牙耳机的麦克风会把耳机切到通话模式(HFP),
         // 导致音乐音质明显下降(蓝牙协议限制,无法绕过)
@@ -735,7 +751,21 @@ final class AudioController: ObservableObject {
             shared.inputPeakBits.store(peak.bitPattern, ordering: .relaxed)
         }
 
+        // 人声突显:开则投喂分类器(格式变化时重建,与 converter 同样罕见);
+        // 关则释放——不重建引擎即可热切换
         let fmt = buffer.format
+        if shared.voiceFocusEnabled.load(ordering: .relaxed) != 0 {
+            if ctx.voiceAnalyzer == nil || ctx.voiceAnalyzerRate != fmt.sampleRate
+                || ctx.voiceAnalyzerCh != fmt.channelCount {
+                ctx.voiceAnalyzer = try? VoiceFocusAnalyzer(format: fmt)
+                ctx.voiceAnalyzerRate = fmt.sampleRate
+                ctx.voiceAnalyzerCh = fmt.channelCount
+            }
+            ctx.voiceAnalyzer?.feed(buffer)
+        } else if ctx.voiceAnalyzer != nil {
+            ctx.voiceAnalyzer = nil
+            shared.voiceSpeechActive.store(0, ordering: .relaxed)
+        }
         if ctx.converter == nil || ctx.inSampleRate != fmt.sampleRate || ctx.inChannels != fmt.channelCount {
             guard let conv = makeConverter(from: fmt, to: ctx.canonicalFormat) else {
                 shared.convertErrors.add(1, ordering: .relaxed)
@@ -820,6 +850,9 @@ final class AudioController: ObservableObject {
         ctx.dsp.updateGate(enabled: shared.gateEnabled.load(ordering: .relaxed) != 0,
                            threshold: Float(bitPattern: shared.gateThresholdBits.load(ordering: .relaxed)),
                            sampleRate: ctx.sampleRate)
+        ctx.dsp.updateVoiceFocus(enabled: shared.voiceFocusEnabled.load(ordering: .relaxed) != 0,
+                                 active: shared.voiceSpeechActive.load(ordering: .relaxed) != 0,
+                                 sampleRate: ctx.sampleRate)
 
         let list = UnsafeMutableAudioBufferListPointer(abl)
         var gotAny = false
@@ -1126,9 +1159,9 @@ final class AudioController: ObservableObject {
             + "\(pendingAutoResume ? " / 等待设备重连" : "")")
         lines.append("输入:\(settings.inputUID.isEmpty ? "系统默认(\(defaultInputName))" : settings.inputUID)")
         lines.append("输出:\(settings.outputUID.isEmpty ? "系统默认(\(defaultOutputName))" : settings.outputUID)")
-        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@",
-                            Int(volume * 100), muted.description,
-                            gateEnabled.description, gateThresholdDB, lowLatency.description))
+        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@ 人声突显:%@",
+                            Int(volume * 100), muted.description, gateEnabled.description,
+                            gateThresholdDB, lowLatency.description, voiceFocus.description))
         lines.append(String(format: "啸叫守护增益 %d%% 自适应缓冲倍数 ×%.1f",
                             Int(feedbackGain * 100), bufferScale))
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",

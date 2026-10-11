@@ -13,6 +13,7 @@ final class Settings {
         static let muted = "muted"
         static let gateEnabled = "gateEnabled"
         static let gateThresholdDB = "gateThresholdDB"
+        static let voiceFocus = "voiceFocus"      // 人声突显:非人声自动压低 ~22dB
         static let lowLatency = "lowLatency"      // 低延迟模式(默认开):请求小 IO 缓冲
         static let dockIcon = "dockIcon"          // Dock 图标模式:regular vs accessory
         static let wasRunning = "wasRunning"
@@ -42,6 +43,10 @@ final class Settings {
     var gateThresholdDB: Float {
         get { d.object(forKey: K.gateThresholdDB) != nil ? d.float(forKey: K.gateThresholdDB) : -50 }
         set { d.set(newValue, forKey: K.gateThresholdDB) }
+    }
+    var voiceFocus: Bool {
+        get { d.bool(forKey: K.voiceFocus) }
+        set { d.set(newValue, forKey: K.voiceFocus) }
     }
     /// 低延迟模式默认开启:只在用户明确关掉时才持久化为 false
     var lowLatency: Bool {
