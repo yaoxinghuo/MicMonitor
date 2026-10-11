@@ -1,64 +1,71 @@
 # MicMonitor
 
-macOS 菜单栏小工具:把麦克风声音**实时直通**到你选定的输出设备(耳机),并可调节混入音量。
-适合"戴着降噪耳机听歌,听不到同事叫你"的场景——音乐仍由系统正常播放,本应用只额外叠加麦克风声音。
+English | [中文](README-zh.md)
 
-- 无 Dock 图标,只出现在菜单栏
-- 可分别选择输入(麦克风)与输出(耳机)设备,默认跟随系统
-- 混入音量 0%~200%(超过 100% 自动软限幅防爆音),支持一键静音
-- 可选噪声门:电平低于阈值时不混入,避免持续底噪(带实时电平条辅助调阈值)
-- 设备热插拔自动停止/恢复,默认设备变化自动跟随
-- 无第三方依赖,通用二进制(Apple Silicon + Intel),最低 macOS 15
+A lightweight macOS menu bar tool that **passes your microphone through to your headphones in real time**, with adjustable mix volume.
+Built for the "wearing noise-isolating headphones and can't hear coworkers calling you" scenario — your music keeps playing through the system as usual; this app only adds the mic signal on top.
 
-## 下载与首次使用
+- Lives in the menu bar (optional Dock icon that opens a settings window on click)
+- Independently selectable input (mic) and output (headphone) devices; follows system defaults
+- Mix volume 0%–200% (soft-clipped above 100%, no clipping distortion), one-click mute
+- Optional noise gate with a live level meter to help set the threshold
+- Feedback guard: automatically lowers volume when the mic picks up headphone output
+- Low-latency mode + adaptive buffering: buffer auto-scales up when a device can't keep a stable clock
+- Auto stop/resume on device hot-plug; follows default device changes
+- English and Chinese UI (follows system language)
+- Zero third-party dependencies; universal binary (Apple Silicon + Intel); macOS 15+
 
-1. 在仓库的 **Actions** 页选择最新一次成功构建,下载 `MicMonitor-*.zip`;
-   或打 `v*` 标签后在 **Releases** 下载 `MicMonitor.zip`。
-2. 解压得到 `MicMonitor.app`,拖到 `应用程序` 或任意目录。
-3. **因为是 ad-hoc 签名(无 Apple 开发者证书),首次打开会被 Gatekeeper 拦截**,任选一种:
-   - 右键 `MicMonitor.app` → **打开** → 在对话框里再点"打开";
-   - 或终端执行:
+## Download & First Launch
+
+1. Download `MicMonitor.zip` from the latest **Release** (CI builds and publishes it when a `v*` tag is pushed);
+   for development builds, grab the artifact from the latest successful **Actions** run.
+2. Unzip to get `MicMonitor.app`, drag it to `Applications` or anywhere you like.
+3. **The app is ad-hoc signed (no Apple Developer certificate), so Gatekeeper will block the first launch.** Either:
+   - Right-click `MicMonitor.app` → **Open** → click "Open" in the dialog; or
+   - Remove the quarantine attribute in Terminal (then double-click works):
      ```bash
      xattr -dr com.apple.quarantine /path/to/MicMonitor.app
      ```
-4. 首次点"启用麦克风直通"会弹出麦克风权限请求,点允许。
-   如果误点拒绝:菜单栏图标 → "打开系统设置" 直达 隐私与安全性 → 麦克风。
-5. **注意:ad-hoc 签名每次重新构建后都会变,macOS 可能让麦克风权限失效**,此时执行:
+4. Toggling "Enable Mic Passthrough" the first time shows the microphone permission prompt — click Allow.
+   If you accidentally deny it: menu bar icon → "Open System Settings" goes straight to Privacy & Security → Microphone.
+5. **Note: the ad-hoc signature changes on every rebuild, which can invalidate the mic permission.** If that happens:
    ```bash
    tccutil reset Microphone com.example.micmonitor
    ```
-   然后重启 App 重新授权。
+   then relaunch the app and re-authorize.
 
-## 使用说明
+## Usage
 
-| 选项 | 说明 |
+| Option | Notes |
 |---|---|
-| 输入设备 | 建议用"内置麦克风"。**不要选蓝牙耳机的麦克风**:蓝牙协议限制,启用麦克风会让耳机切换到通话模式(HFP),音乐音质明显下降。面板检测到输入/输出是同一台蓝牙设备时会给出黄色提示。 |
-| 输出设备 | 选你正在戴的耳机,或"系统默认"自动跟随。 |
-| 混入音量 | 0%~200%。100% 为原样增益;超过 100% 的部分经过软限幅,不会爆音。 |
-| 噪声门 | 环境安静但耳机里有持续底噪时打开;看电平条把阈值调到"底噪之下、说话声之上"。起音约 10ms、释放约 400ms 的平滑,不会明显卡顿。 |
-| 缓冲 | 面板底部显示当前缓冲水位(ms),正常约 20~40ms。欠载/丢弃计数异常增多说明设备时钟漂移较大。 |
+| Input device | The built-in mic is recommended. **Avoid a Bluetooth headset mic**: the Bluetooth protocol switches the headset into call mode (HFP), noticeably degrading music quality. A yellow warning appears when input and output are the same Bluetooth device. |
+| Output device | Pick the headphones you're wearing, or "System Default" to follow the system. |
+| Mix volume | 0%–200%. 100% is unity gain; anything above is soft-clipped — louder, but no hard clipping. |
+| Noise gate | Enable when a constant hiss is audible in quiet environments. Watch the level meter and set the threshold "above the noise floor, below speech" (attack ~10 ms, release ~400 ms). |
+| Low-latency mode | On by default; requests a smaller I/O buffer to cut end-to-end latency (reduces the "echo" feel). Automatically falls back if the device can't keep up. |
+| Show icon in Dock | Off by default (menu-bar only). When on, clicking the Dock icon opens the same settings panel as a window. |
+| Buffer | The footer shows the current ring-buffer level (ms) and underrun/drop counts; on unstable devices the adaptive buffer scales up automatically (orange hint). |
 
-## 常见问题
+## FAQ
 
-- **蓝牙耳机音质突然变差**:这是开了蓝牙麦克风的必然结果(HFP 协议),改用内置麦克风即可恢复。
-- **有回声/啸叫**:耳机漏音被麦克风再次拾取。把混入音量调低、打开噪声门、或换密闭性更好的耳机;音箱外放时不要开直通。
-- **延迟偏高/有卡顿**:查看面板"缓冲"值与欠载计数;USB/蓝牙设备时钟漂移大时会周期性听到轻微跳变,切到同一大设备或内置麦克风可改善。
-- **排查问题**:面板点"复制诊断信息"(含版本、设备列表、权限、错误计数、最近日志),把它贴出来即可定位。
+- **Bluetooth audio suddenly sounds terrible**: an unavoidable consequence of enabling a Bluetooth mic (HFP profile). Switch the input to the built-in mic.
+- **Echo / howling**: headphone leakage is being re-captured by the mic. Lower the mix volume, enable the noise gate, or use better-isolating headphones. The feedback guard auto-attenuates, but the real fix is physical distance between mic and driver (e.g. the built-in mic). Don't enable passthrough over speakers.
+- **High latency / stuttering**: check the buffer level and underrun counter in the panel; USB/Bluetooth devices with drifting clocks can cause periodic crackling — the adaptive buffer mitigates this automatically.
+- **Troubleshooting**: click "Copy Diagnostics" in the panel (version, device list, permissions, error counters, recent log) and paste it when reporting issues.
 
-## 开发/构建(无需 Xcode)
+## Development / Building (no Xcode required)
 
 ```bash
-swift test              # 单元测试(RingBuffer / DSP)
-bash scripts/build_app.sh   # 产出 MicMonitor.zip(通用二进制 + ad-hoc 签名)
+swift test                  # unit tests (RingBuffer / DSP)
+bash scripts/build_app.sh   # produces MicMonitor.zip (universal binary, ad-hoc signed)
 ```
 
-CI:push 到 main / PR / 手动触发都会构建并上传 zip;打 `v*` 标签会自动建 Release。
+CI: pushes to main / PRs / manual dispatch run the unit tests; the .app/.zip artifact and a GitHub Release are only produced when a `v*` tag is pushed.
 
-## 技术要点
+## Implementation Notes
 
-- 单个 `AVAudioEngine` 的输入/输出节点共享底层 I/O 设备,无法分别指定 → 采用**两个独立 engine + SPSC 无锁环形缓冲**(`Synchronization.Atomic`,无第三方依赖)。
-- 采集端 `installTap` → `AVAudioConverter` 统一转为播放端规范格式(交错 Float32);播放端 `AVAudioSourceNode` 拉数据,经 `mainMixerNode` 输出。
-- 时钟漂移:目标水位约 2.5 块(~26ms@48k),超过 6 块丢弃旧数据拉回;欠载补静音并由生产端重新预填充。
-- 增益逐样本线性斜坡防爆音;噪声门 attack 10ms / release 400ms;软限幅为连续可导的 tanh 饱和曲线(阈值 0.8)。
-- 渲染/采集回调内不分配、不加锁、不打日志;电平与计数全部走原子量,UI 以 ~15fps 定时读取。
+- **Architecture**: prefer a private aggregate audio device (input sub-device + output sub-device, output as master clock, drift compensation on) driven by a **single `AVAudioEngine`** — input tap and output rendering share one I/O cycle and clock domain, so there is no drift by construction (same approach as AU Lab passthrough). Falls back to a dual-engine + ring-buffer design if aggregate creation fails.
+- **Data path**: capture `installTap` → `AVAudioConverter` into a canonical planar Float32 format → lock-free SPSC ring buffer → `AVAudioSourceNode` → `mainMixerNode` → output.
+- **Stability**: low-latency requests read back the device's actual granted buffer size; a 2 s post-start underrun self-check; every 3 s underrun+overflow deltas feed an adaptive buffer that scales up ×1.8 (cap ×6); a 2 s suppression window on configuration-change notifications breaks rebuild loops.
+- **DSP**: per-sample linear gain ramps; noise gate with 10 ms attack / 400 ms release; `tanh` soft clip (threshold 0.8); feedback governor lowers gain when output stays near the clip point.
+- Real-time callbacks do no allocation, no locking, no logging; levels and counters are atomics read by the UI at ~15 fps.
