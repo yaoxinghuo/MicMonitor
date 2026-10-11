@@ -86,7 +86,10 @@ struct MenuPanelView: View {
 
             Divider()
 
-            Toggle("噪声门", isOn: $c.gateEnabled)
+            HStack(spacing: 6) {
+                Toggle("噪声门", isOn: $c.gateEnabled)
+                helpMark("环境安静但耳机里有持续底噪时开启;电平低于阈值的声音不混入。看电平条把阈值设在「底噪之上、说话声之下」。")
+            }
             if c.gateEnabled {
                 HStack(spacing: 8) {
                     Text("阈值")
@@ -104,7 +107,10 @@ struct MenuPanelView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Toggle("人声突显", isOn: $c.voiceFocus)
+            HStack(spacing: 6) {
+                Toggle("人声突显", isOn: $c.voiceFocus)
+                helpMark("检测到语音时正常播放;无人声时按「压低量」衰减,突出说话声、压低环境噪声。可与噪声门叠加。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合下方状态指示调节。")
+            }
             if c.voiceFocus {
                 HStack(spacing: 8) {
                     Text("灵敏度")
@@ -126,32 +132,29 @@ struct MenuPanelView: View {
                     .font(.caption2)
                     .foregroundStyle(c.voiceSpeechActiveUI ? .green : .secondary)
             }
-            Text("检测到语音时正常播放;无人声时按「压低量」衰减,突出说话声、压低环境噪声。可与噪声门叠加使用。灵敏度过低可能把人声也压掉,过高则失去过滤效果;结合上方状态指示调节。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
-            Text("启用后请求更小的设备 IO 缓冲。若声音卡顿、欠载增加,可关闭回退。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Toggle("低延迟模式(减少回声感)", isOn: $c.lowLatency)
+                helpMark("启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。")
+            }
 
             Divider()
 
-            Toggle("在 Dock 中显示图标", isOn: Binding(
-                get: { c.showDockIcon },
-                set: { c.setDockIcon($0) }
-            ))
-            Text("开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Toggle("在 Dock 中显示图标", isOn: Binding(
+                    get: { c.showDockIcon },
+                    set: { c.setDockIcon($0) }
+                ))
+                helpMark("开启后可点 Dock 图标打开此面板;菜单栏图标仍会保留。")
+            }
 
-            Toggle("开机自启", isOn: Binding(
-                get: { c.launchAtLogin },
-                set: { c.setLaunchAtLogin($0) }
-            ))
+            HStack(spacing: 6) {
+                Toggle("开机自启", isOn: Binding(
+                    get: { c.launchAtLogin },
+                    set: { c.setLaunchAtLogin($0) }
+                ))
+                helpMark("登录后自动启动 MicMonitor。若系统提示需要批准,去 系统设置 → 通用 → 登录项 中允许。")
+            }
             if c.launchNeedsApproval {
                 Text("需在 系统设置 → 通用 → 登录项 中允许 MicMonitor")
                     .font(.caption2)
@@ -197,6 +200,13 @@ struct MenuPanelView: View {
         .padding(14)
         .frame(width: 350)
         .onReceive(meterTimer) { _ in c.refreshMeters() }
+    }
+
+    /// 问号帮助图标:悬停显示 .help 系统原生 tooltip,说明文字不占版面
+    private func helpMark(_ key: LocalizedStringKey) -> some View {
+        Image(systemName: "questionmark.circle")
+            .foregroundStyle(.secondary)
+            .help(key)
     }
 }
 
