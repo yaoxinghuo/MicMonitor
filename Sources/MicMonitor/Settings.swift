@@ -16,7 +16,7 @@ final class Settings {
         static let voiceFocus = "voiceFocus"      // 人声突显:非人声自动压低 ~22dB
         static let voiceFocusSensitivity = "voiceFocusSensitivity" // 灵敏度 0~1 → 分类阈值
         static let voiceDuckDB = "voiceDuckDB"  // 非人声压低量(dB,负值)
-        static let voiceEnhance = "voiceEnhance" // 人声增强:系统 VPIO 语音处理(AGC+降噪+消回声)
+        static let voiceEnhance = "voiceEnhance" // 人声增强:DSP 侧自动增益(AGC)
         static let lowLatency = "lowLatency"      // 低延迟模式(默认开):请求小 IO 缓冲
         static let dockIcon = "dockIcon"          // Dock 图标模式:regular vs accessory
         static let wasRunning = "wasRunning"
@@ -61,7 +61,7 @@ final class Settings {
         get { d.object(forKey: K.voiceDuckDB) != nil ? d.float(forKey: K.voiceDuckDB) : -22 }
         set { d.set(min(newValue, 0), forKey: K.voiceDuckDB) }
     }
-    /// 人声增强(系统 VPIO):开启后强制双引擎路径
+    /// 人声增强(DSP AGC):小信号自动抬升,远处人声更清楚
     var voiceEnhance: Bool {
         get { d.bool(forKey: K.voiceEnhance) }
         set { d.set(newValue, forKey: K.voiceEnhance) }

@@ -22,6 +22,8 @@ final class MeterState: @unchecked Sendable {
     let voiceFocusThreshBits = Atomic<UInt32>(Float(0.28).bitPattern) // 语音置信度阈值(灵敏度滑杆映射)
     let voiceDuckBits = Atomic<UInt32>(Float(0.08).bitPattern)        // 非人声压低目标增益(≈-22dB)
     let voiceSpeechActive = Atomic<Int>(0)                    // 分类器当前判定(分类器 → 实时线程)
+    let voiceEnhanceEnabled = Atomic<Int>(0)                  // 人声增强(AGC)开关(UI → 实时线程)
+    let agcGainBits = Atomic<UInt32>(Float(1).bitPattern)     // AGC 当前提升增益(诊断用)
     let bufferedFrames = Atomic<Int>(0)                       // 播放端环形缓冲水位
     let convertErrors = Atomic<Int>(0)
 }
@@ -34,8 +36,6 @@ final class CaptureContext: @unchecked Sendable {
     let canonicalFormat: AVAudioFormat   // 非交错 Float32,播放端采样率与声道数
     let channelCount: Int
     let prefillFrames: Int
-    /// true = 转换器把所有输出声道映射到输入 ch0(VPIO 多声道里只有 ch0 是处理后的人声)
-    let monoDownmix: Bool
     /// 声道指针数组(预分配):ring.write 的入参,回调内零分配
     let inPtrs: UnsafeMutableBufferPointer<UnsafeBufferPointer<Float>>
     /// 转换器意外吐出交错布局时的拆分暂存:[ch][scratchFrames]
@@ -52,13 +52,12 @@ final class CaptureContext: @unchecked Sendable {
     var voiceAnalyzerCh: UInt32 = 0
 
     init(ring: RingBuffer, shared: MeterState, canonicalFormat: AVAudioFormat,
-         channelCount: Int, prefillFrames: Int, monoDownmix: Bool = false) {
+         channelCount: Int, prefillFrames: Int) {
         self.ring = ring
         self.shared = shared
         self.canonicalFormat = canonicalFormat
         self.channelCount = channelCount
         self.prefillFrames = prefillFrames
-        self.monoDownmix = monoDownmix
         inPtrs = .allocate(capacity: channelCount)
         scratch = .allocate(capacity: channelCount * scratchFrames)
         scratch.initialize(repeating: 0)
@@ -196,13 +195,14 @@ final class AudioController: ObservableObject {
     }
     /// 分类器实时判定(UI 指示用)
     @Published private(set) var voiceSpeechActiveUI = false
-    /// 人声增强:开启系统 VoiceProcessingIO(AGC 自动增益 + 降噪 + 回声消除,FaceTime 同款),
-    /// 对"远处说话听不清"最有效。VPIO 有独立的设备管理,不能套聚合设备 → 强制双引擎路径,
-    /// 切换需要重建引擎
+    /// 人声增强:DSP 侧自动增益(AGC),安静小信号自动抬到目标电平,远处人声更清楚。
+    /// 只改原子量,热切换不需要重建引擎。
+    /// 注:系统 VPIO 方案已验证不可行——VPIO 在 AVAudioEngine 中只能纯采集,
+    /// 无法与聚合/播放共存,双引擎时钟漂移会产生持续欠载。
     @Published var voiceEnhance = false {
         didSet {
+            meter.voiceEnhanceEnabled.store(voiceEnhance ? 1 : 0, ordering: .relaxed)
             settings.voiceEnhance = voiceEnhance
-            if isRunning { scheduleRebuild("切换人声增强") }
         }
     }
     /// 低延迟模式:请求 256 帧 IO 缓冲并把水位压到 ~5 块,端到端延迟 ~27ms;
@@ -245,6 +245,7 @@ final class AudioController: ObservableObject {
     @Published var inputLevel: Float = 0
     @Published var gateGain: Float = 1
     @Published var feedbackGain: Float = 1
+    @Published var agcGain: Float = 1
     @Published var bufferedMS: Double = 0
     @Published var underrunCount = 0
     @Published var overflowCount = 0
@@ -325,6 +326,7 @@ final class AudioController: ObservableObject {
         pushThreshold()
         meter.gateEnabled.store(gateEnabled ? 1 : 0, ordering: .relaxed)
         meter.voiceFocusEnabled.store(voiceFocus ? 1 : 0, ordering: .relaxed)
+        meter.voiceEnhanceEnabled.store(voiceEnhance ? 1 : 0, ordering: .relaxed)
         pushVoiceThreshold()
         pushVoiceDuck()
 
@@ -479,9 +481,8 @@ final class AudioController: ObservableObject {
         do {
             // 首选:私有聚合设备 + 单引擎(AU Lab passthrough 同款方案)。
             // 输入输出在同一 IO proc/时钟域,系统做漂移补偿,无欠载/回声问题。
-            // 例外:人声增强(VPIO)有自己独立的 I/O 与设备管理,不能绑聚合,
-            // 必须走双引擎路径;聚合创建失败同样回退双引擎。
-            if !voiceEnhance, let inDev, let outDev,
+            // 聚合创建失败时回退原双引擎路径。
+            if let inDev, let outDev,
                let agg = CoreAudioUtil.createAggregateDevice(inputUID: inDev.uid, outputUID: outDev.uid) {
                 do {
                     try buildUnifiedEngine(aggregate: agg, input: inDev, output: outDev)
@@ -497,9 +498,7 @@ final class AudioController: ObservableObject {
                     try buildDualEngines(input: inDev, output: outDev)
                 }
             } else {
-                if voiceEnhance {
-                    log.log("人声增强开启:使用双引擎路径(VPIO 独立设备管理)")
-                } else if inDev == nil || outDev == nil {
+                if inDev == nil || outDev == nil {
                     log.log("输入/输出设备未具体指定,使用双引擎路径")
                 } else {
                     log.log("聚合设备创建失败,回退双引擎")
@@ -713,12 +712,11 @@ final class AudioController: ObservableObject {
         engine.isAutoShutdownEnabled = false
         let inputNode = engine.inputNode
 
-        // 人声增强开 → VoiceProcessingIO(系统 AGC/降噪/AEC,采集输出为多声道,
-        // ch0 才是处理后的人声,需在转换器里只取 ch0);关 → 原始 HAL 采集
+        // 关闭语音处理,使用原始 HAL 采集
         do {
-            try inputNode.setVoiceProcessingEnabled(voiceEnhance)
+            try inputNode.setVoiceProcessingEnabled(false)
         } catch {
-            log.log("\(voiceEnhance ? "开启" : "关闭") VoiceProcessing 失败,按原始采集继续:\(error.localizedDescription)")
+            log.log("关闭 VoiceProcessing 失败(继续运行):\(error.localizedDescription)")
         }
 
         if let input {
@@ -735,10 +733,8 @@ final class AudioController: ObservableObject {
             _ = requestIOBufferFrames(inID, input: true, wanted: 256)
         }
 
-        // VPIO 采集输出是多声道(ch0=处理后的人声,其余为参考/内部流),须只取 ch0
         let ctx = CaptureContext(ring: ring, shared: meter, canonicalFormat: canonical,
-                                 channelCount: outputChannelCount, prefillFrames: ring.targetWater,
-                                 monoDownmix: voiceEnhance)
+                                 channelCount: outputChannelCount, prefillFrames: ring.targetWater)
         // format: nil → 使用设备原生输入格式,在回调内做格式转换
         inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 256 : 512, format: nil) { buffer, _ in
             Self.tap(ctx: ctx, buffer: buffer)
@@ -811,8 +807,7 @@ final class AudioController: ObservableObject {
             shared.voiceSpeechActive.store(0, ordering: .relaxed)
         }
         if ctx.converter == nil || ctx.inSampleRate != fmt.sampleRate || ctx.inChannels != fmt.channelCount {
-            guard let conv = makeConverter(from: fmt, to: ctx.canonicalFormat,
-                                           monoDownmix: ctx.monoDownmix) else {
+            guard let conv = makeConverter(from: fmt, to: ctx.canonicalFormat) else {
                 shared.convertErrors.add(1, ordering: .relaxed)
                 return
             }
@@ -899,6 +894,8 @@ final class AudioController: ObservableObject {
                                  active: shared.voiceSpeechActive.load(ordering: .relaxed) != 0,
                                  duckGain: Float(bitPattern: shared.voiceDuckBits.load(ordering: .relaxed)),
                                  sampleRate: ctx.sampleRate)
+        ctx.dsp.updateAGC(enabled: shared.voiceEnhanceEnabled.load(ordering: .relaxed) != 0,
+                          sampleRate: ctx.sampleRate)
 
         let list = UnsafeMutableAudioBufferListPointer(abl)
         var gotAny = false
@@ -947,17 +944,14 @@ final class AudioController: ObservableObject {
         shared.bufferedFrames.store(ctx.ring.availableFrames, ordering: .relaxed)
         shared.gateGainBits.store(ctx.dsp.gateGain.bitPattern, ordering: .relaxed)
         shared.feedbackGainBits.store(ctx.dsp.feedbackGain.bitPattern, ordering: .relaxed)
+        shared.agcGainBits.store(ctx.dsp.agcGain.bitPattern, ordering: .relaxed)
         return noErr
     }
 
     /// 构建转换器;声道数不一致时显式给映射表(单声道麦克风 → 双声道为复制第 0 声道)。
-    /// monoDownmix:所有输出声道强制取输入 ch0(VPIO 多声道里仅 ch0 是处理后的人声)。
-    private static func makeConverter(from: AVAudioFormat, to: AVAudioFormat,
-                                      monoDownmix: Bool = false) -> AVAudioConverter? {
+    private static func makeConverter(from: AVAudioFormat, to: AVAudioFormat) -> AVAudioConverter? {
         guard let c = AVAudioConverter(from: from, to: to) else { return nil }
-        if monoDownmix {
-            c.channelMap = (0..<Int(to.channelCount)).map { _ in NSNumber(value: 0) }
-        } else if from.channelCount != to.channelCount {
+        if from.channelCount != to.channelCount {
             let inCh = max(1, Int(from.channelCount))
             c.channelMap = (0..<Int(to.channelCount)).map { NSNumber(value: min($0, inCh - 1)) }
         }
@@ -1113,6 +1107,7 @@ final class AudioController: ObservableObject {
         inputLevel = max(peak, inputLevel * 0.8)  // UI 侧峰值保持衰减
         gateGain = Float(bitPattern: meter.gateGainBits.load(ordering: .relaxed))
         feedbackGain = Float(bitPattern: meter.feedbackGainBits.load(ordering: .relaxed))
+        agcGain = Float(bitPattern: meter.agcGainBits.load(ordering: .relaxed))
         voiceSpeechActiveUI = meter.voiceSpeechActive.load(ordering: .relaxed) != 0
         bufferedMS = Double(meter.bufferedFrames.load(ordering: .relaxed)) / sampleRate * 1000
         if let ring {
@@ -1214,8 +1209,8 @@ final class AudioController: ObservableObject {
                             Int(volume * 100), muted.description, gateEnabled.description,
                             gateThresholdDB, lowLatency.description, voiceFocus.description,
                             voiceEnhance.description))
-        lines.append(String(format: "啸叫守护增益 %d%% 自适应缓冲倍数 ×%.1f",
-                            Int(feedbackGain * 100), bufferScale))
+        lines.append(String(format: "啸叫守护增益 %d%% AGC 增益 ×%.1f 自适应缓冲倍数 ×%.1f",
+                            Int(feedbackGain * 100), agcGain, bufferScale))
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",
                             sampleRate, outputChannelCount, bufferedMS))
         lines.append("欠载 \(underrunCount) 次 · 溢出丢弃 \(overflowCount) 次 · 重建 \(restartCount) 次"

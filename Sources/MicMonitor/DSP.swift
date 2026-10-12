@@ -32,6 +32,22 @@ final class DSPEngine: @unchecked Sendable {
     private var voiceAttackCoeff: Float = 0
     private var voiceReleaseCoeff: Float = 0
 
+    // ---- 人声增强(自动增益 AGC)----
+    // 用输入包络的均方值估算当前电平,算出"把它抬到目标电平所需增益";
+    // 只向上补增益(≥1,不压大信号——大信号交给软限幅和音量控制),上限 +20dB。
+    // 增益上升用慢时间常数(安静时底噪慢慢爬起,不会"嘭"地推起来),
+    // 增益下降用快时间常数(响起来立刻退,防止过推)。
+    // 曾尝试改用系统 VPIO 实现人声增强:VPIO 只能纯采集不能接播放端,
+    // 被迫走双引擎后时钟漂移导致每 3 秒数百次欠载,故改为 DSP 侧自研 AGC。
+    var agcEnabled = false
+    private(set) var agcGain: Float = 1
+    private var agcEnv: Float = 0         // 输入能量包络(均方值)
+    private var agcEnvCoeff: Float = 0
+    private var agcUpCoeff: Float = 0     // 增益上升(慢)
+    private var agcDownCoeff: Float = 0   // 增益下降(快)
+    private let agcTarget: Float = 0.14   // 目标 RMS 电平 ≈ -17dB
+    private let agcMaxGain: Float = 10    // 增益上限 ≈ +20dB
+
     // ---- 电平(只读,供 UI 电平表)----
     private(set) var inputPeak: Float = 0
     private(set) var outputPeak: Float = 0
@@ -96,6 +112,17 @@ final class DSPEngine: @unchecked Sendable {
         voiceReleaseCoeff = 1 - expf(-1 / (releaseSec * sr))
     }
 
+    /// 更新人声增强(AGC)参数。envSec 为输入电平包络时间窗;
+    /// upSec/downSec 为增益往目标靠近的平滑时间(慢升快降)。
+    func updateAGC(enabled: Bool, sampleRate: Double,
+                   envSec: Float = 0.300, upSec: Float = 1.200, downSec: Float = 0.060) {
+        agcEnabled = enabled
+        let sr = Float(max(sampleRate, 1))
+        agcEnvCoeff = 1 - expf(-1 / (envSec * sr))
+        agcUpCoeff = 1 - expf(-1 / (upSec * sr))
+        agcDownCoeff = 1 - expf(-1 / (downSec * sr))
+    }
+
     /// 就地处理一块 planar 音频(dsts[c] 为第 c 声道的缓冲)。返回本块输入峰值。
     /// 两遍处理:先逐帧算出总增益(音量斜坡 × 门开合度),再逐声道施加并限幅。
     @discardableResult
@@ -119,6 +146,17 @@ final class DSPEngine: @unchecked Sendable {
 
                 envelope = framePeak > envelope ? framePeak : envelope * envDecayCoeff
 
+                // AGC:包络用均方值跟踪输入能量(用输入侧测,不形成增益反馈环)
+                if agcEnabled {
+                    agcEnv += (framePeak * framePeak - agcEnv) * agcEnvCoeff
+                    let desired = min(agcMaxGain, max(1, agcTarget / sqrtf(agcEnv + 1e-9)))
+                    let ac = desired > agcGain ? agcUpCoeff : agcDownCoeff
+                    agcGain += (desired - agcGain) * ac
+                } else {
+                    agcGain += (1 - agcGain) * agcDownCoeff  // 关闭时快速回落到 1,不跳变
+                    agcEnv = 0
+                }
+
                 let target: Float = (!gateEnabled || envelope >= gateThreshold) ? 1 : 0
                 let coeff = target > gateGain ? gateAttackCoeff : gateReleaseCoeff
                 gateGain += (target - gateGain) * coeff
@@ -132,7 +170,7 @@ final class DSPEngine: @unchecked Sendable {
                     rampRemaining -= 1
                     if rampRemaining == 0 { volumeCurrent = volumeTarget }
                 }
-                gainScratch[i] = volumeCurrent * gateGain * feedbackGain * voiceGain
+                gainScratch[i] = volumeCurrent * gateGain * feedbackGain * voiceGain * agcGain
             }
             // 第二遍:逐声道应用增益 + 软限幅
             for c in 0..<channels {
@@ -166,6 +204,8 @@ final class DSPEngine: @unchecked Sendable {
         gateGain = 1
         envelope = 0
         voiceGain = 1
+        agcGain = 1
+        agcEnv = 0
         inputPeak = 0
         outputPeak = 0
         feedbackGain = 1
