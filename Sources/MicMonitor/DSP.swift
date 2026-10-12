@@ -48,6 +48,28 @@ final class DSPEngine: @unchecked Sendable {
     private let agcTarget: Float = 0.14   // 目标 RMS 电平 ≈ -17dB
     private let agcMaxGain: Float = 10    // 增益上限 ≈ +20dB
 
+    // ---- 人声频段 EQ(随 AGC 启用)----
+    // 纯 AGC 会把键盘/底噪一起放大,人声清晰度靠频段选择:
+    // 高通 ~280Hz 砍桌面震动/键盘低频砰声;临场峰 +5dB@3kHz 突出辅音区。
+    // 两个 2 阶 biquad 串联,每声道独立状态;EQ 在包络测量前施加,
+    // 让 AGC 按"人声频段能量"而非全带能量计算增益(低频轰隆不会推高增益)。
+    private struct Biquad {
+        var b0: Float = 0, b1: Float = 0, b2: Float = 0, a1: Float = 0, a2: Float = 0
+        var x1: Float = 0, x2: Float = 0, y1: Float = 0, y2: Float = 0
+        @inline(__always) mutating func run(_ x: Float) -> Float {
+            let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2 = x1; x1 = x; y2 = y1; y1 = y
+            return y
+        }
+        mutating func setCoeffs(_ c: (Float, Float, Float, Float, Float)) {
+            (b0, b1, b2, a1, a2) = c
+            x1 = 0; x2 = 0; y1 = 0; y2 = 0
+        }
+    }
+    private var hpBiquads = [Biquad](repeating: Biquad(), count: 8)
+    private var presBiquads = [Biquad](repeating: Biquad(), count: 8)
+    private var eqSampleRate: Double = 0
+
     // ---- 电平(只读,供 UI 电平表)----
     private(set) var inputPeak: Float = 0
     private(set) var outputPeak: Float = 0
@@ -112,7 +134,7 @@ final class DSPEngine: @unchecked Sendable {
         voiceReleaseCoeff = 1 - expf(-1 / (releaseSec * sr))
     }
 
-    /// 更新人声增强(AGC)参数。envSec 为输入电平包络时间窗;
+    /// 更新人声增强(AGC + 人声频段 EQ)参数。envSec 为输入电平包络时间窗;
     /// upSec/downSec 为增益往目标靠近的平滑时间(慢升快降)。
     func updateAGC(enabled: Bool, sampleRate: Double,
                    envSec: Float = 0.300, upSec: Float = 1.200, downSec: Float = 0.060) {
@@ -121,6 +143,38 @@ final class DSPEngine: @unchecked Sendable {
         agcEnvCoeff = 1 - expf(-1 / (envSec * sr))
         agcUpCoeff = 1 - expf(-1 / (upSec * sr))
         agcDownCoeff = 1 - expf(-1 / (downSec * sr))
+        // biquad 系数只在启用且采样率变化时重算(setCoeffs 会清零滤波状态,
+        // 每块重算会破坏滤波器);禁用时置 0 以便下次启用重新初始化
+        if enabled && eqSampleRate != sampleRate {
+            eqSampleRate = sampleRate
+            configureEQ(sampleRate: sr)
+        } else if !enabled {
+            eqSampleRate = 0
+        }
+    }
+
+    /// RBJ 双二阶系数:高通(去低频轰鸣)+ 临场峰(突出辅音)
+    private func configureEQ(sampleRate sr: Float) {
+        func biquadHP(_ fc: Float, _ q: Float) -> (Float, Float, Float, Float, Float) {
+            let w0 = 2 * Float.pi * fc / sr
+            let (cw, sw) = (cosf(w0), sinf(w0))
+            let alpha = sw / (2 * q), a0 = 1 + alpha
+            return ((1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0,
+                    -2 * cw / a0, (1 - alpha) / a0)
+        }
+        func biquadPeak(_ fc: Float, _ q: Float, _ db: Float) -> (Float, Float, Float, Float, Float) {
+            let w0 = 2 * Float.pi * fc / sr
+            let (cw, sw) = (cosf(w0), sinf(w0))
+            let A = powf(10, db / 40), alpha = sw / (2 * q), a0 = 1 + alpha / A
+            return ((1 + alpha * A) / a0, -2 * cw / a0, (1 - alpha * A) / a0,
+                    -2 * cw / a0, (1 - alpha / A) / a0)
+        }
+        let hp = biquadHP(280, 0.7071)      // ~Butterworth HP,切低频砰声/震动
+        let pk = biquadPeak(3000, 0.9, 5)   // +5dB 临场峰,辅音清晰度
+        for c in 0..<hpBiquads.count {
+            hpBiquads[c].setCoeffs(hp)
+            presBiquads[c].setCoeffs(pk)
+        }
     }
 
     /// 就地处理一块 planar 音频(dsts[c] 为第 c 声道的缓冲)。返回本块输入峰值。
@@ -131,6 +185,7 @@ final class DSPEngine: @unchecked Sendable {
         var inPeak: Float = 0
         var outPeak: Float = 0
         var f = 0
+        let doEQ = agcEnabled && channels <= hpBiquads.count
         while f < frames {
             let n = min(frames - f, gainScratch.count)
             // 第一遍:逐帧计算峰值包络、门开合度、音量斜坡 → 总增益
@@ -138,7 +193,11 @@ final class DSPEngine: @unchecked Sendable {
                 let fi = f + i
                 var framePeak: Float = 0
                 for c in 0..<channels {
-                    let v = dsts[c][fi]
+                    var v = dsts[c][fi]
+                    if doEQ {
+                        v = presBiquads[c].run(hpBiquads[c].run(v))
+                        dsts[c][fi] = v
+                    }
                     let a = v < 0 ? -v : v
                     if a > framePeak { framePeak = a }
                 }
@@ -206,6 +265,10 @@ final class DSPEngine: @unchecked Sendable {
         voiceGain = 1
         agcGain = 1
         agcEnv = 0
+        for c in 0..<hpBiquads.count {
+            hpBiquads[c].x1 = 0; hpBiquads[c].x2 = 0; hpBiquads[c].y1 = 0; hpBiquads[c].y2 = 0
+            presBiquads[c].x1 = 0; presBiquads[c].x2 = 0; presBiquads[c].y1 = 0; presBiquads[c].y2 = 0
+        }
         inputPeak = 0
         outputPeak = 0
         feedbackGain = 1

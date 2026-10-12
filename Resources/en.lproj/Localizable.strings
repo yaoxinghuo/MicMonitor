@@ -26,7 +26,7 @@
 "当前状态:检测到语音" = "Status: speech detected";
 "当前状态:非人声(已压低)" = "Status: non-speech (ducked)";
 "人声增强(自动增益)" = "Voice Enhance (Auto Gain)";
-"自动抬升小声输入(上限约 +20dB):安静时增益缓慢拉高、响起来快速回落,让远处人声更清楚。底噪也会被一起放大,建议配合噪声门使用。" = "Automatically boosts quiet input (up to about +20dB): gain rises slowly when it's quiet and backs off quickly when it's loud, so distant voices come through clearly. Background noise gets amplified too — use together with the noise gate.";
+"自动抬升小声输入(上限约 +20dB),并突出人声频段(切低频、提升 3kHz 辅音区),让远处人声更清楚。建议同时开「人声突显」压低键盘等非人声。" = "Automatically boosts quiet input (up to about +20dB) and emphasizes the speech band (cuts lows, lifts the 3kHz consonant region) so distant voices come through clearly. Pair with Voice Focus to duck non-speech like keyboards.";
 "当前增益提升:+%@ dB" = "Current boost: +%@ dB";
 "低延迟模式(减少回声感)" = "Low-Latency Mode (reduces echo)";
 "启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。" = "Requests a smaller I/O buffer on the devices for lower end-to-end latency and less echo feel. If audio stutters or underruns increase, turn this off to fall back.";

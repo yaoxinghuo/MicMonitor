@@ -130,7 +130,7 @@ struct MenuPanelView: View {
             }
 
             helpRow("venh", "人声增强(自动增益)", isOn: $c.voiceEnhance,
-                    help: "自动抬升小声输入(上限约 +20dB):安静时增益缓慢拉高、响起来快速回落,让远处人声更清楚。底噪也会被一起放大,建议配合噪声门使用。")
+                    help: "自动抬升小声输入(上限约 +20dB),并突出人声频段(切低频、提升 3kHz 辅音区),让远处人声更清楚。建议同时开「人声突显」压低键盘等非人声。")
             if c.voiceEnhance {
                 Text("当前增益提升:+\(String(format: "%.1f", 20 * log10f(max(c.agcGain, 1e-3)))) dB")
                     .font(.caption2)
