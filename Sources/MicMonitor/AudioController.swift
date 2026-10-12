@@ -34,6 +34,8 @@ final class CaptureContext: @unchecked Sendable {
     let canonicalFormat: AVAudioFormat   // 非交错 Float32,播放端采样率与声道数
     let channelCount: Int
     let prefillFrames: Int
+    /// true = 转换器把所有输出声道映射到输入 ch0(VPIO 多声道里只有 ch0 是处理后的人声)
+    let monoDownmix: Bool
     /// 声道指针数组(预分配):ring.write 的入参,回调内零分配
     let inPtrs: UnsafeMutableBufferPointer<UnsafeBufferPointer<Float>>
     /// 转换器意外吐出交错布局时的拆分暂存:[ch][scratchFrames]
@@ -50,12 +52,13 @@ final class CaptureContext: @unchecked Sendable {
     var voiceAnalyzerCh: UInt32 = 0
 
     init(ring: RingBuffer, shared: MeterState, canonicalFormat: AVAudioFormat,
-         channelCount: Int, prefillFrames: Int) {
+         channelCount: Int, prefillFrames: Int, monoDownmix: Bool = false) {
         self.ring = ring
         self.shared = shared
         self.canonicalFormat = canonicalFormat
         self.channelCount = channelCount
         self.prefillFrames = prefillFrames
+        self.monoDownmix = monoDownmix
         inPtrs = .allocate(capacity: channelCount)
         scratch = .allocate(capacity: channelCount * scratchFrames)
         scratch.initialize(repeating: 0)
@@ -193,6 +196,15 @@ final class AudioController: ObservableObject {
     }
     /// 分类器实时判定(UI 指示用)
     @Published private(set) var voiceSpeechActiveUI = false
+    /// 人声增强:开启系统 VoiceProcessingIO(AGC 自动增益 + 降噪 + 回声消除,FaceTime 同款),
+    /// 对"远处说话听不清"最有效。VPIO 有独立的设备管理,不能套聚合设备 → 强制双引擎路径,
+    /// 切换需要重建引擎
+    @Published var voiceEnhance = false {
+        didSet {
+            settings.voiceEnhance = voiceEnhance
+            if isRunning { scheduleRebuild("切换人声增强") }
+        }
+    }
     /// 低延迟模式:请求 256 帧 IO 缓冲并把水位压到 ~5 块,端到端延迟 ~27ms;
     /// 关掉则回到系统默认缓冲。若设备跟不上小缓冲,启动自检会自动关闭此项并提示。
     @Published var lowLatency = true {
@@ -306,6 +318,7 @@ final class AudioController: ObservableObject {
         voiceFocus = settings.voiceFocus
         voiceFocusSensitivity = settings.voiceFocusSensitivity
         voiceDuckDB = settings.voiceDuckDB
+        voiceEnhance = settings.voiceEnhance
         lowLatency = settings.lowLatency
         showDockIcon = settings.dockIcon
         pushGain()
@@ -466,8 +479,9 @@ final class AudioController: ObservableObject {
         do {
             // 首选:私有聚合设备 + 单引擎(AU Lab passthrough 同款方案)。
             // 输入输出在同一 IO proc/时钟域,系统做漂移补偿,无欠载/回声问题。
-            // 聚合创建失败时回退原双引擎路径。
-            if let inDev, let outDev,
+            // 例外:人声增强(VPIO)有自己独立的 I/O 与设备管理,不能绑聚合,
+            // 必须走双引擎路径;聚合创建失败同样回退双引擎。
+            if !voiceEnhance, let inDev, let outDev,
                let agg = CoreAudioUtil.createAggregateDevice(inputUID: inDev.uid, outputUID: outDev.uid) {
                 do {
                     try buildUnifiedEngine(aggregate: agg, input: inDev, output: outDev)
@@ -483,7 +497,9 @@ final class AudioController: ObservableObject {
                     try buildDualEngines(input: inDev, output: outDev)
                 }
             } else {
-                if inDev == nil || outDev == nil {
+                if voiceEnhance {
+                    log.log("人声增强开启:使用双引擎路径(VPIO 独立设备管理)")
+                } else if inDev == nil || outDev == nil {
                     log.log("输入/输出设备未具体指定,使用双引擎路径")
                 } else {
                     log.log("聚合设备创建失败,回退双引擎")
@@ -697,11 +713,12 @@ final class AudioController: ObservableObject {
         engine.isAutoShutdownEnabled = false
         let inputNode = engine.inputNode
 
-        // 关闭语音处理,使用原始 HAL 采集;VoiceProcessingIO 会附带 AGC/AEC 并可能锁定 48k
+        // 人声增强开 → VoiceProcessingIO(系统 AGC/降噪/AEC,采集输出为多声道,
+        // ch0 才是处理后的人声,需在转换器里只取 ch0);关 → 原始 HAL 采集
         do {
-            try inputNode.setVoiceProcessingEnabled(false)
+            try inputNode.setVoiceProcessingEnabled(voiceEnhance)
         } catch {
-            log.log("关闭 VoiceProcessing 失败(继续运行):\(error.localizedDescription)")
+            log.log("\(voiceEnhance ? "开启" : "关闭") VoiceProcessing 失败,按原始采集继续:\(error.localizedDescription)")
         }
 
         if let input {
@@ -718,8 +735,10 @@ final class AudioController: ObservableObject {
             _ = requestIOBufferFrames(inID, input: true, wanted: 256)
         }
 
+        // VPIO 采集输出是多声道(ch0=处理后的人声,其余为参考/内部流),须只取 ch0
         let ctx = CaptureContext(ring: ring, shared: meter, canonicalFormat: canonical,
-                                 channelCount: outputChannelCount, prefillFrames: ring.targetWater)
+                                 channelCount: outputChannelCount, prefillFrames: ring.targetWater,
+                                 monoDownmix: voiceEnhance)
         // format: nil → 使用设备原生输入格式,在回调内做格式转换
         inputNode.installTap(onBus: 0, bufferSize: lowLatency ? 256 : 512, format: nil) { buffer, _ in
             Self.tap(ctx: ctx, buffer: buffer)
@@ -792,7 +811,8 @@ final class AudioController: ObservableObject {
             shared.voiceSpeechActive.store(0, ordering: .relaxed)
         }
         if ctx.converter == nil || ctx.inSampleRate != fmt.sampleRate || ctx.inChannels != fmt.channelCount {
-            guard let conv = makeConverter(from: fmt, to: ctx.canonicalFormat) else {
+            guard let conv = makeConverter(from: fmt, to: ctx.canonicalFormat,
+                                           monoDownmix: ctx.monoDownmix) else {
                 shared.convertErrors.add(1, ordering: .relaxed)
                 return
             }
@@ -930,10 +950,14 @@ final class AudioController: ObservableObject {
         return noErr
     }
 
-    /// 构建转换器;声道数不一致时显式给映射表(单声道麦克风 → 双声道为复制第 0 声道)
-    private static func makeConverter(from: AVAudioFormat, to: AVAudioFormat) -> AVAudioConverter? {
+    /// 构建转换器;声道数不一致时显式给映射表(单声道麦克风 → 双声道为复制第 0 声道)。
+    /// monoDownmix:所有输出声道强制取输入 ch0(VPIO 多声道里仅 ch0 是处理后的人声)。
+    private static func makeConverter(from: AVAudioFormat, to: AVAudioFormat,
+                                      monoDownmix: Bool = false) -> AVAudioConverter? {
         guard let c = AVAudioConverter(from: from, to: to) else { return nil }
-        if from.channelCount != to.channelCount {
+        if monoDownmix {
+            c.channelMap = (0..<Int(to.channelCount)).map { _ in NSNumber(value: 0) }
+        } else if from.channelCount != to.channelCount {
             let inCh = max(1, Int(from.channelCount))
             c.channelMap = (0..<Int(to.channelCount)).map { NSNumber(value: min($0, inCh - 1)) }
         }
@@ -1186,9 +1210,10 @@ final class AudioController: ObservableObject {
             + "\(pendingAutoResume ? " / 等待设备重连" : "")")
         lines.append("输入:\(settings.inputUID.isEmpty ? "系统默认(\(defaultInputName))" : settings.inputUID)")
         lines.append("输出:\(settings.outputUID.isEmpty ? "系统默认(\(defaultOutputName))" : settings.outputUID)")
-        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@ 人声突显:%@",
+        lines.append(String(format: "音量 %d%% 静音:%@ 噪声门:%@ 阈值 %.0fdB 低延迟:%@ 人声突显:%@ 人声增强:%@",
                             Int(volume * 100), muted.description, gateEnabled.description,
-                            gateThresholdDB, lowLatency.description, voiceFocus.description))
+                            gateThresholdDB, lowLatency.description, voiceFocus.description,
+                            voiceEnhance.description))
         lines.append(String(format: "啸叫守护增益 %d%% 自适应缓冲倍数 ×%.1f",
                             Int(feedbackGain * 100), bufferScale))
         lines.append(String(format: "输出 %.0fHz × %dch 缓冲 %.1fms",

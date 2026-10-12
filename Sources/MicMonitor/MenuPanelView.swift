@@ -129,6 +129,9 @@ struct MenuPanelView: View {
                     .foregroundStyle(c.voiceSpeechActiveUI ? .green : .secondary)
             }
 
+            helpRow("venh", "人声增强(系统语音处理)", isOn: $c.voiceEnhance,
+                    help: "调用 macOS 系统语音处理(FaceTime 同款):自动增益(远处人声也会拉清楚)、降噪、回声消除。开启后走双引擎路径;音量建议降回 100% 左右。")
+
             helpRow("lowlat", "低延迟模式(减少回声感)", isOn: $c.lowLatency,
                     help: "启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。")
 

@@ -25,6 +25,8 @@
 "灵敏度" = "Sensitivity";
 "当前状态:检测到语音" = "Status: speech detected";
 "当前状态:非人声(已压低)" = "Status: non-speech (ducked)";
+"人声增强(系统语音处理)" = "Voice Enhance (System Speech Processing)";
+"调用 macOS 系统语音处理(FaceTime 同款):自动增益(远处人声也会拉清楚)、降噪、回声消除。开启后走双引擎路径;音量建议降回 100% 左右。" = "Uses macOS system voice processing (the same engine FaceTime uses): automatic gain control lifts quiet/distant voices, plus noise suppression and echo cancellation. Switches to the dual-engine path; try keeping the mix volume around 100%.";
 "低延迟模式(减少回声感)" = "Low-Latency Mode (reduces echo)";
 "启用后请求更小的设备 IO 缓冲,端到端延迟更低、回声感更弱;设备跟不上时若声音卡顿、欠载增加,可关闭回退。" = "Requests a smaller I/O buffer on the devices for lower end-to-end latency and less echo feel. If audio stutters or underruns increase, turn this off to fall back.";
 "在 Dock 中显示图标" = "Show Icon in Dock";
